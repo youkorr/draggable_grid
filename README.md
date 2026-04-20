@@ -1,4 +1,26 @@
 ```
+
+Option (a) — draggable: false : chaque entrée de buttons accepte désormais une forme dict. Un bouton pinné garde son YAML natif (on_press, on_long_press, on_click...) — aucun overlay, aucun relais. Il occupe une case que le reflow ne peut pas toucher :
+
+buttons:
+  - btn_light                  # draggable (forme courte)
+  - id: btn_alarm              # draggable (forme dict)
+  - id: btn_settings           # pinne
+    draggable: false
+
+3) Option (b) — trigger externe : deux actions YAML pour entrer/sortir du edit mode depuis n'importe quel bouton (y compris un bouton pinné) :
+
+on_long_press:
+  - draggable_grid.toggle_edit_mode: my_grid
+  # ou
+  - draggable_grid.set_edit_mode:
+      id: my_grid
+      value: true
+
+Cas d'usage direct pour ton bouton lumière : mets draggable: false dessus → on_press toggle la lumière, on_long_press ouvre la modale RGB, aucun conflit avec le mode édition. Le mode édition s'active depuis un autre bouton via draggable_grid.toggle_edit_mode
+
+
+
 external_components:
   - source:
       type: local
