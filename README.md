@@ -1,5 +1,12 @@
 ```
 
+fonctionnement
+
+Au PRESSED en edit mode, snapshot de l'ordre actuel des boutons.
+Pendant le drag, dès que ton doigt survole une autre case, les voisins coulissent (anim 180 ms ease_out) pour combler — comme sur iOS.
+Au lâcher, le bouton saisi se pose sur la case qu'il occupe logiquement, les autres sont déjà à leur nouvelle place.
+
+
 Option (a) — draggable: false : chaque entrée de buttons accepte désormais une forme dict. Un bouton pinné garde son YAML natif (on_press, on_long_press, on_click...) — aucun overlay, aucun relais. Il occupe une case que le reflow ne peut pas toucher :
 
 buttons:
