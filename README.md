@@ -40,9 +40,9 @@ external_components:
 # ----------------------------------------------------------------------------
 # the draggable_grid declaration (anywhere at the root level)
 # ----------------------------------------------------------------------------
-# Ordre des cases = ordre des boutons.
-# cell_w / cell_h sont les dimensions d'un bouton (pour detecter la case la
-# plus proche au drop).
+# Order of boxes = order of buttons.
+# cell_w / cell_h are the dimensions of a button (to detect the nearest box on drop).
+
 draggable_grid:
 cell_w: 150
 cell_h: 100
