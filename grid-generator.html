@@ -1,0 +1,1370 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Draggable Grid — Générateur YAML</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0d0f14;
+    --surface: #161a22;
+    --surface2: #1e2433;
+    --border: #2a3145;
+    --accent: #4fffb0;
+    --accent2: #4fa8ff;
+    --text: #e8eaf0;
+    --muted: #6b7494;
+    --danger: #ff4f6a;
+    --cell-empty: #1a2035;
+    --cell-hover: #243050;
+    --cell-filled: #1a3a28;
+    --cell-filled-border: #4fffb0;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Syne', sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* HEADER */
+  header {
+    padding: 28px 40px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .logo {
+    width: 36px; height: 36px;
+    background: var(--accent);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .logo svg { width: 20px; height: 20px; }
+  header h1 {
+    font-size: 1.3rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+  }
+  header h1 span { color: var(--accent); }
+  .badge {
+    margin-left: auto;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 4px 12px;
+    font-size: 0.72rem;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* LAYOUT */
+  .layout {
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    gap: 0;
+    flex: 1;
+    min-height: 0;
+  }
+
+  /* SIDEBAR */
+  .sidebar {
+    border-right: 1px solid var(--border);
+    padding: 28px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    overflow-y: auto;
+  }
+
+  .section-label {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+
+  .field-group { display: flex; flex-direction: column; gap: 10px; }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .field label {
+    font-size: 0.8rem;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .field input, .field select {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+    padding: 8px 12px;
+    outline: none;
+    transition: border-color 0.15s;
+    width: 100%;
+  }
+  .field input:focus, .field select:focus {
+    border-color: var(--accent);
+  }
+  .field input[type=range] {
+    padding: 4px 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .field .range-row {
+    display: flex; align-items: center; gap: 10px;
+  }
+  .field .range-val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+    color: var(--accent);
+    min-width: 30px;
+    text-align: right;
+  }
+
+  /* Presets */
+  .presets {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .preset-btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: 'Syne', sans-serif;
+    font-size: 0.78rem;
+    font-weight: 700;
+    padding: 8px 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-align: center;
+  }
+  .preset-btn:hover {
+    border-color: var(--accent2);
+    color: var(--accent2);
+  }
+  .preset-btn.active {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(79,255,176,0.06);
+  }
+
+  /* Stats */
+  .stats {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .stat { display: flex; flex-direction: column; gap: 2px; }
+  .stat .val {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .stat .key { font-size: 0.7rem; color: var(--muted); }
+
+  /* Button name list */
+  .btn-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 220px;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+  .btn-list::-webkit-scrollbar { width: 4px; }
+  .btn-list::-webkit-scrollbar-track { background: transparent; }
+  .btn-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .btn-entry {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .btn-entry .num {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--muted);
+    min-width: 20px;
+    text-align: right;
+  }
+  .btn-entry input {
+    flex: 1;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    padding: 5px 10px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .btn-entry input:focus { border-color: var(--accent2); }
+  .btn-entry .pin-toggle {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 5px 7px;
+    font-size: 0.75rem;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .btn-entry .pin-toggle.pinned {
+    border-color: var(--danger);
+    color: var(--danger);
+    background: rgba(255,79,106,0.08);
+  }
+
+  /* MAIN */
+  .main {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .preview-area {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+    overflow: auto;
+    background:
+      radial-gradient(ellipse 60% 50% at 70% 40%, rgba(79,255,176,0.04) 0%, transparent 70%),
+      var(--bg);
+  }
+
+  .screen-wrap {
+    position: relative;
+    display: inline-block;
+  }
+
+  .screen-frame {
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    background: #0a0c10;
+    overflow: hidden;
+    position: relative;
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,0.04),
+      0 24px 60px rgba(0,0,0,0.5);
+  }
+
+  .screen-label {
+    position: absolute;
+    top: -28px;
+    left: 0;
+    font-size: 0.72rem;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .grid-canvas {
+    display: block;
+    position: relative;
+  }
+
+  .grid-cell {
+    position: absolute;
+    background: var(--cell-empty);
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .grid-cell:hover {
+    background: var(--cell-hover);
+    border-color: var(--accent2);
+    border-style: solid;
+  }
+  .grid-cell.filled {
+    background: var(--cell-filled);
+    border: 1.5px solid var(--cell-filled-border);
+    border-style: solid;
+  }
+  .grid-cell.filled:hover {
+    background: #1f4530;
+    border-color: #6fffca;
+  }
+  .grid-cell.pinned-cell {
+    background: rgba(255,79,106,0.08);
+    border-color: var(--danger);
+    border-style: solid;
+  }
+  .cell-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.62rem;
+    color: var(--accent);
+    text-align: center;
+    padding: 2px;
+    pointer-events: none;
+    word-break: break-all;
+  }
+  .cell-label.pinned { color: var(--danger); }
+  .cell-idx {
+    position: absolute;
+    top: 3px;
+    left: 5px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.55rem;
+    color: var(--muted);
+    pointer-events: none;
+  }
+
+  /* YAML OUTPUT */
+  .yaml-panel {
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .yaml-header {
+    display: flex;
+    align-items: center;
+    padding: 12px 20px;
+    gap: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .yaml-header span {
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .copy-btn {
+    margin-left: auto;
+    background: var(--accent);
+    color: #000;
+    border: none;
+    border-radius: 6px;
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    font-size: 0.78rem;
+    padding: 6px 16px;
+    cursor: pointer;
+    transition: all 0.15s;
+    letter-spacing: 0.04em;
+  }
+  .copy-btn:hover { background: #6fffca; }
+  .copy-btn.copied { background: var(--accent2); color: #fff; }
+
+  .yaml-code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    line-height: 1.7;
+    color: #c9d1e8;
+    padding: 16px 20px;
+    white-space: pre;
+    overflow-x: auto;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .yaml-code::-webkit-scrollbar { width: 4px; height: 4px; }
+  .yaml-code::-webkit-scrollbar-track { background: transparent; }
+  .yaml-code::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .y-key { color: #4fa8ff; }
+  .y-val { color: #4fffb0; }
+  .y-str { color: #ffcb6b; }
+  .y-comment { color: #4b5570; }
+  .y-num { color: #f78c6c; }
+
+  /* TOAST */
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: var(--accent);
+    color: #000;
+    font-weight: 700;
+    font-size: 0.82rem;
+    padding: 10px 20px;
+    border-radius: 8px;
+    opacity: 0;
+    transform: translateY(10px);
+    transition: all 0.2s;
+    pointer-events: none;
+    z-index: 999;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+
+  /* Upload zone */
+  .upload-zone {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 16px 12px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    position: relative;
+    background: var(--surface2);
+  }
+  .upload-zone:hover, .upload-zone.drag-over {
+    border-color: var(--accent2);
+    background: rgba(79,168,255,0.06);
+  }
+  .upload-zone.success {
+    border-color: var(--accent);
+    background: rgba(79,255,176,0.06);
+  }
+  .upload-zone.error {
+    border-color: var(--danger);
+    background: rgba(255,79,106,0.06);
+  }
+  .upload-zone input[type=file] {
+    position: absolute; inset: 0;
+    opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+  .upload-icon { font-size: 1.6rem; margin-bottom: 6px; }
+  .upload-title {
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 3px;
+  }
+  .upload-sub {
+    font-size: 0.7rem;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .import-result {
+    margin-top: 10px;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 0.75rem;
+    font-family: 'JetBrains Mono', monospace;
+    display: none;
+  }
+  .import-result.ok {
+    display: block;
+    background: rgba(79,255,176,0.08);
+    border: 1px solid rgba(79,255,176,0.3);
+    color: var(--accent);
+  }
+  .import-result.err {
+    display: block;
+    background: rgba(255,79,106,0.08);
+    border: 1px solid rgba(255,79,106,0.3);
+    color: var(--danger);
+  }
+  .import-result .found-btn {
+    display: inline-block;
+    background: rgba(79,255,176,0.12);
+    border: 1px solid rgba(79,255,176,0.25);
+    border-radius: 4px;
+    padding: 1px 6px;
+    margin: 2px 2px;
+    font-size: 0.7rem;
+    color: var(--accent);
+  }
+  .import-result .found-btn.pin {
+    background: rgba(255,79,106,0.12);
+    border-color: rgba(255,79,106,0.25);
+    color: var(--danger);
+  }
+
+  /* Lang switcher */
+  .lang-switcher {
+    display: flex;
+    gap: 4px;
+    margin-left: auto;
+  }
+  .lang-btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--muted);
+    font-family: 'Syne', sans-serif;
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 4px 10px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .lang-btn:hover { border-color: var(--accent2); color: var(--accent2); }
+  .lang-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(79,255,176,0.08); }
+
+  /* Responsive */
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar { border-right: none; border-bottom: 1px solid var(--border); }
+    .preview-area { padding: 20px; min-height: 300px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <svg viewBox="0 0 20 20" fill="none">
+      <rect x="2" y="2" width="6" height="6" rx="1.5" fill="#000"/>
+      <rect x="12" y="2" width="6" height="6" rx="1.5" fill="#000"/>
+      <rect x="2" y="12" width="6" height="6" rx="1.5" fill="#000"/>
+      <rect x="12" y="12" width="6" height="6" rx="1.5" fill="#000"/>
+    </svg>
+  </div>
+  <h1>Draggable Grid <span>YAML Generator</span></h1>
+  <div class="badge">ESPHome · LVGL</div>
+  <div class="lang-switcher">
+    <button class="lang-btn active" id="lang-fr" onclick="setLang('fr')">FR</button>
+    <button class="lang-btn" id="lang-en" onclick="setLang('en')">EN</button>
+  </div>
+</header>
+
+<div class="layout">
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+
+    <div>
+      <div class="section-label" data-i18n="import_label">📂 Importer un fichier YAML ESPHome</div>
+      <div class="upload-zone" id="upload-zone">
+        <input type="file" id="yaml-file-input" accept=".yaml,.yml">
+        <div class="upload-icon">⬆️</div>
+        <div class="upload-title" data-i18n="upload_title">Glisser votre fichier .yaml ici</div>
+        <div class="upload-sub" data-i18n="upload_sub">ou cliquer pour parcourir</div>
+      </div>
+      <div class="import-result" id="import-result"></div>
+    </div>
+
+    <div>
+      <div class="section-label" data-i18n="screen_label">📐 Résolution de l'écran</div>
+      <div class="presets">
+        <button class="preset-btn" data-w="320"  data-h="240">320 × 240</button>
+        <button class="preset-btn" data-w="480"  data-h="320">480 × 320</button>
+        <button class="preset-btn" data-w="800"  data-h="480">800 × 480</button>
+        <button class="preset-btn" data-w="1024" data-h="600">1024 × 600</button>
+        <button class="preset-btn active" data-w="1280" data-h="720">1280 × 720</button>
+        <button class="preset-btn" data-w="1280" data-h="800">1280 × 800</button>
+      </div>
+      <div class="field-group" style="margin-top:10px">
+        <div class="field">
+          <label data-i18n="width_label">Largeur (px)</label>
+          <input type="number" id="sw" value="1280" min="200" max="1920">
+        </div>
+        <div class="field">
+          <label data-i18n="height_label">Hauteur (px)</label>
+          <input type="number" id="sh" value="720" min="100" max="1080">
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-label" data-i18n="grid_label">⬛ Grille</div>
+      <div class="field-group">
+        <div class="field">
+          <label data-i18n="cols_label">Colonnes</label>
+          <div class="range-row">
+            <input type="range" id="cols" min="1" max="8" value="3">
+            <span class="range-val" id="cols-val">3</span>
+          </div>
+        </div>
+        <div class="field">
+          <label data-i18n="rows_label">Lignes</label>
+          <div class="range-row">
+            <input type="range" id="rows" min="1" max="6" value="3">
+            <span class="range-val" id="rows-val">3</span>
+          </div>
+        </div>
+        <div class="field">
+          <label data-i18n="gap_label">Espacement (px)</label>
+          <div class="range-row">
+            <input type="range" id="gap" min="0" max="30" value="10">
+            <span class="range-val" id="gap-val">10</span>
+          </div>
+        </div>
+        <div class="field">
+          <label data-i18n="margin_label">Marge (px)</label>
+          <div class="range-row">
+            <input type="range" id="margin" min="0" max="80" value="10">
+            <span class="range-val" id="margin-val">10</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-label" data-i18n="btn_label">🔘 Noms des boutons <span style="font-size:0.65rem;color:var(--muted)" data-i18n="btn_hint">— cliquez une case pour l'activer</span></div>
+      <div class="btn-list" id="btn-list"></div>
+    </div>
+
+    <div class="stats">
+      <div class="stat">
+        <div class="val" id="stat-cells">9</div>
+        <div class="key" data-i18n="stat_cells">cases</div>
+      </div>
+      <div class="stat">
+        <div class="val" id="stat-cw">—</div>
+        <div class="key">cell_w</div>
+      </div>
+      <div class="stat">
+        <div class="val" id="stat-ch">—</div>
+        <div class="key">cell_h</div>
+      </div>
+      <div class="stat">
+        <div class="val" id="stat-pinned">0</div>
+        <div class="key" data-i18n="stat_pinned">pinned</div>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+    <div class="preview-area">
+      <div class="screen-wrap">
+        <div class="screen-label" id="screen-label">1280 × 720 px</div>
+        <div class="screen-frame">
+          <div class="grid-canvas" id="grid-canvas"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="yaml-panel">
+      <div class="yaml-header">
+        <span data-i18n="yaml_title">📋 YAML généré</span>
+        <button class="copy-btn" id="copy-btn" data-i18n="copy_btn">Copier</button>
+      </div>
+      <div class="yaml-code" id="yaml-out"></div>
+    </div>
+  </main>
+</div>
+
+<div class="toast" id="toast" data-i18n="toast_msg">✓ Copié dans le presse-papier !</div>
+
+<script>
+// ─── i18n ────────────────────────────────────────────────────────────────────
+const TRANSLATIONS = {
+  fr: {
+    import_label:  '📂 Importer un fichier YAML ESPHome',
+    upload_title:  'Glisser votre fichier .yaml ici',
+    upload_sub:    'ou cliquer pour parcourir',
+    screen_label:  '📐 Résolution de l\'écran',
+    width_label:   'Largeur (px)',
+    height_label:  'Hauteur (px)',
+    grid_label:    '⬛ Grille',
+    cols_label:    'Colonnes',
+    rows_label:    'Lignes',
+    gap_label:     'Espacement (px)',
+    margin_label:  'Marge (px)',
+    btn_label:     '🔘 Noms des boutons',
+    btn_hint:      '— cliquez une case pour l\'activer',
+    stat_cells:    'cases',
+    stat_pinned:   'pinned',
+    yaml_title:    '📋 YAML généré',
+    copy_btn:      'Copier',
+    copy_done:     '✓ Copié !',
+    toast_msg:     '✓ Copié dans le presse-papier !',
+    pin_free:      '🔓 libre',
+    pin_fixed:     '📌 fixé',
+    pin_title:     'Fixé = non déplaçable (draggable: false)',
+    import_ok_grid:'✓ draggable_grid importé',
+    import_detected:'boutons détectés :',
+    import_ok_lvgl :'✓ {n} bouton(s) LVGL détecté(s)',
+    import_no_grid :'Pas de draggable_grid existant — grille générée automatiquement.',
+    import_err_none:'⚠️ Aucun bouton LVGL ni draggable_grid trouvé.',
+    import_err_hint:'Vérifiez que votre YAML contient des blocs <code>button:</code> avec un <code>id:</code> dans la section <code>lvgl &gt; widgets</code>.',
+    import_err_type:'⚠️ Fichier non reconnu. Utilisez un fichier <code>.yaml</code> ou <code>.yml</code>.',
+    import_err_read:'⚠️ Erreur de lecture : ',
+    yaml_comment1:  '# ─── Coller dans votre fichier ESPHome ───────────────────────────',
+    yaml_comment2:  '# ── Boutons LVGL (à déclarer dans lvgl > widgets > button) ───────',
+    yaml_case:      'case',
+    yaml_col:       'col',
+    yaml_ligne:     'ligne',
+    yaml_fixed:     '# ← fixé (non déplaçable)',
+  },
+  en: {
+    import_label:  '📂 Import an ESPHome YAML file',
+    upload_title:  'Drag your .yaml file here',
+    upload_sub:    'or click to browse',
+    screen_label:  '📐 Screen resolution',
+    width_label:   'Width (px)',
+    height_label:  'Height (px)',
+    grid_label:    '⬛ Grid',
+    cols_label:    'Columns',
+    rows_label:    'Rows',
+    gap_label:     'Spacing (px)',
+    margin_label:  'Margin (px)',
+    btn_label:     '🔘 Button names',
+    btn_hint:      '— click a cell to activate',
+    stat_cells:    'cells',
+    stat_pinned:   'pinned',
+    yaml_title:    '📋 Generated YAML',
+    copy_btn:      'Copy',
+    copy_done:     '✓ Copied!',
+    toast_msg:     '✓ Copied to clipboard!',
+    pin_free:      '🔓 free',
+    pin_fixed:     '📌 pinned',
+    pin_title:     'Pinned = not draggable (draggable: false)',
+    import_ok_grid:'✓ draggable_grid imported',
+    import_detected:'buttons detected:',
+    import_ok_lvgl :'✓ {n} LVGL button(s) detected',
+    import_no_grid :'No existing draggable_grid — grid generated automatically.',
+    import_err_none:'⚠️ No LVGL buttons or draggable_grid found.',
+    import_err_hint:'Make sure your YAML contains <code>button:</code> blocks with an <code>id:</code> inside the <code>lvgl &gt; widgets</code> section.',
+    import_err_type:'⚠️ Unrecognized file. Please use a <code>.yaml</code> or <code>.yml</code> file.',
+    import_err_read:'⚠️ Read error: ',
+    yaml_comment1:  '# ─── Paste into your ESPHome file ───────────────────────────────',
+    yaml_comment2:  '# ── LVGL buttons (declare under lvgl > widgets > button) ─────────',
+    yaml_case:      'cell',
+    yaml_col:       'col',
+    yaml_ligne:     'row',
+    yaml_fixed:     '# ← pinned (not draggable)',
+  },
+};
+
+let lang = 'fr';
+
+function t(key) { return TRANSLATIONS[lang][key] || key; }
+
+function setLang(l) {
+  lang = l;
+  document.getElementById('lang-fr').classList.toggle('active', l === 'fr');
+  document.getElementById('lang-en').classList.toggle('active', l === 'en');
+  document.documentElement.lang = l;
+  // Update all static i18n elements
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const key = el.getAttribute('data-i18n');
+    if (key === 'btn_label') {
+      el.childNodes[0].textContent = t('btn_label') + ' ';
+      return;
+    }
+    if (TRANSLATIONS[l][key] !== undefined) el.textContent = TRANSLATIONS[l][key];
+  });
+  // Re-render dynamic parts
+  renderBtnList();
+  renderYaml();
+}
+
+// ─── State ───────────────────────────────────────────────────────────────────
+const state = {
+  sw: 1280, sh: 720,
+  cols: 3, rows: 3,
+  gap: 10, margin: 10,
+  btnNames: [],   // string[]
+  pinned: [],     // bool[]
+  SCALE: 0.55,    // facteur de zoom pour l'aperçu
+};
+
+function totalCells() { return state.cols * state.rows; }
+
+function ensureBtnArrays() {
+  const n = totalCells();
+  while (state.btnNames.length < n) {
+    state.btnNames.push(`btn_${state.btnNames.length + 1}`);
+    state.pinned.push(false);
+  }
+}
+
+// ─── Geometry ────────────────────────────────────────────────────────────────
+function cellW() {
+  const avail = state.sw - 2 * state.margin - (state.cols - 1) * state.gap;
+  return Math.floor(avail / state.cols);
+}
+function cellH() {
+  const avail = state.sh - 2 * state.margin - (state.rows - 1) * state.gap;
+  return Math.floor(avail / state.rows);
+}
+
+function cellPos(col, row) {
+  const cw = cellW(), ch = cellH();
+  return {
+    x: state.margin + col * (cw + state.gap),
+    y: state.margin + row * (ch + state.gap),
+    w: cw,
+    h: ch,
+  };
+}
+
+// ─── Render canvas ───────────────────────────────────────────────────────────
+function renderCanvas() {
+  const canvas = document.getElementById('grid-canvas');
+  const S = state.SCALE;
+
+  canvas.style.width  = Math.round(state.sw * S) + 'px';
+  canvas.style.height = Math.round(state.sh * S) + 'px';
+  canvas.innerHTML = '';
+
+  ensureBtnArrays();
+  const n = totalCells();
+
+  for (let r = 0; r < state.rows; r++) {
+    for (let c = 0; c < state.cols; c++) {
+      const idx = r * state.cols + c;
+      if (idx >= n) continue;
+      const pos = cellPos(c, r);
+      const el = document.createElement('div');
+      el.className = 'grid-cell' +
+        (state.btnNames[idx] ? ' filled' : '') +
+        (state.pinned[idx] ? ' pinned-cell' : '');
+      el.style.left   = Math.round(pos.x * S) + 'px';
+      el.style.top    = Math.round(pos.y * S) + 'px';
+      el.style.width  = Math.round(pos.w * S) + 'px';
+      el.style.height = Math.round(pos.h * S) + 'px';
+
+      const idxLabel = document.createElement('div');
+      idxLabel.className = 'cell-idx';
+      idxLabel.textContent = idx + 1;
+      el.appendChild(idxLabel);
+
+      if (state.btnNames[idx]) {
+        const lbl = document.createElement('div');
+        lbl.className = 'cell-label' + (state.pinned[idx] ? ' pinned' : '');
+        lbl.textContent = state.btnNames[idx];
+        el.appendChild(lbl);
+      }
+
+      el.title = `Case ${idx + 1} — (${pos.x}, ${pos.y})`;
+      canvas.appendChild(el);
+    }
+  }
+
+  document.getElementById('screen-label').textContent =
+    `${state.sw} × ${state.sh} px`;
+}
+
+// ─── Render btn list ─────────────────────────────────────────────────────────
+function renderBtnList() {
+  const list = document.getElementById('btn-list');
+  list.innerHTML = '';
+  ensureBtnArrays();
+  const n = totalCells();
+  for (let i = 0; i < n; i++) {
+    const row = document.createElement('div');
+    row.className = 'btn-entry';
+
+    const num = document.createElement('span');
+    num.className = 'num';
+    num.textContent = i + 1;
+
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.value = state.btnNames[i] || '';
+    inp.placeholder = `btn_${i + 1}`;
+    inp.addEventListener('input', e => {
+      state.btnNames[i] = e.target.value.trim() || `btn_${i + 1}`;
+      renderCanvas();
+      renderYaml();
+    });
+
+    const pin = document.createElement('button');
+    pin.className = 'pin-toggle' + (state.pinned[i] ? ' pinned' : '');
+    pin.textContent = state.pinned[i] ? t('pin_fixed') : t('pin_free');
+    pin.title = t('pin_title');
+    pin.addEventListener('click', () => {
+      state.pinned[i] = !state.pinned[i];
+      renderBtnList();
+      renderCanvas();
+      renderYaml();
+    });
+
+    row.appendChild(num);
+    row.appendChild(inp);
+    row.appendChild(pin);
+    list.appendChild(row);
+  }
+}
+
+// ─── Render YAML ─────────────────────────────────────────────────────────────
+function h(cls, text) {
+  return `<span class="${cls}">${escHtml(text)}</span>`;
+}
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;');
+}
+
+function renderYaml() {
+  ensureBtnArrays();
+  const n = totalCells();
+  const cw = cellW(), ch = cellH();
+
+  // Stats
+  document.getElementById('stat-cells').textContent = n;
+  document.getElementById('stat-cw').textContent = cw;
+  document.getElementById('stat-ch').textContent = ch;
+  document.getElementById('stat-pinned').textContent =
+    state.pinned.slice(0, n).filter(Boolean).length;
+
+  // Build YAML lines as HTML
+  let lines = [];
+  const K = s => h('y-key', s);
+  const V = s => h('y-val', s);
+  const S = s => h('y-str', s);
+  const N = s => h('y-num', s);
+  const C = s => h('y-comment', s);
+
+  lines.push(C(t('yaml_comment1')));
+  lines.push('');
+  lines.push(K('draggable_grid') + ':');
+  lines.push('  ' + K('id') + ': ' + S('my_grid'));
+  lines.push('  ' + K('cell_w') + ': ' + N(cw));
+  lines.push('  ' + K('cell_h') + ': ' + N(ch));
+  lines.push('  ' + K('cells') + ':');
+
+  for (let r = 0; r < state.rows; r++) {
+    for (let c = 0; c < state.cols; c++) {
+      const idx = r * state.cols + c;
+      if (idx >= n) continue;
+      const pos = cellPos(c, r);
+      lines.push('    - ' + C(`# ${t('yaml_case')} ${idx + 1}  (${t('yaml_col')} ${c+1}, ${t('yaml_ligne')} ${r+1})`) );
+      lines.push('      - ' + N(pos.x) + C('  # x'));
+      lines.push('      - ' + N(pos.y) + C('  # y'));
+    }
+  }
+
+  lines.push('  ' + K('buttons') + ':');
+  for (let i = 0; i < n; i++) {
+    const name = state.btnNames[i] || `btn_${i + 1}`;
+    if (state.pinned[i]) {
+      lines.push('    - ' + K('id') + ': ' + S(name) + C('  ' + t('yaml_fixed')));
+      lines.push('      ' + K('draggable') + ': ' + V('false'));
+    } else {
+      lines.push('    - ' + S(name));
+    }
+  }
+
+  lines.push('');
+  lines.push(C(t('yaml_comment2')));
+  for (let i = 0; i < n; i++) {
+    const name = state.btnNames[i] || `btn_${i + 1}`;
+    lines.push(C(`#   id: ${name}`));
+  }
+
+  document.getElementById('yaml-out').innerHTML = lines.join('\n');
+}
+
+// ─── Plain text YAML for clipboard ───────────────────────────────────────────
+function plainYaml() {
+  ensureBtnArrays();
+  const n = totalCells();
+  const cw = cellW(), ch = cellH();
+  let lines = [];
+
+  lines.push(t('yaml_comment1').replace(/^# /, '# '));
+  lines.push('');
+  lines.push('draggable_grid:');
+  lines.push('  id: my_grid');
+  lines.push(`  cell_w: ${cw}`);
+  lines.push(`  cell_h: ${ch}`);
+  lines.push('  cells:');
+
+  for (let r = 0; r < state.rows; r++) {
+    for (let c = 0; c < state.cols; c++) {
+      const idx = r * state.cols + c;
+      if (idx >= n) continue;
+      const pos = cellPos(c, r);
+      lines.push(`    - # ${t('yaml_case')} ${idx + 1}  (${t('yaml_col')} ${c+1}, ${t('yaml_ligne')} ${r+1})`);
+      lines.push(`      - ${pos.x}  # x`);
+      lines.push(`      - ${pos.y}  # y`);
+    }
+  }
+
+  lines.push('  buttons:');
+  for (let i = 0; i < n; i++) {
+    const name = state.btnNames[i] || `btn_${i + 1}`;
+    if (state.pinned[i]) {
+      lines.push(`    - id: ${name}  ${t('yaml_fixed')}`);
+      lines.push(`      draggable: false`);
+    } else {
+      lines.push(`    - ${name}`);
+    }
+  }
+
+  lines.push('');
+  lines.push(t('yaml_comment2'));
+  for (let i = 0; i < n; i++) {
+    const name = state.btnNames[i] || `btn_${i + 1}`;
+    lines.push(`#   id: ${name}`);
+  }
+  return lines.join('\n');
+}
+
+// ─── Minimal YAML parser (no dependencies) ───────────────────────────────────
+// Extracts button ids from lvgl > widgets > button blocks
+// and optionally imports draggable_grid config.
+
+function parseEsphomeYaml(text) {
+  const lines = text.split('\n');
+  const result = {
+    buttons: [],        // {id, draggable}
+    grid: null,         // {cell_w, cell_h, cells, buttons} if found
+    display: null,      // {width, height} if found
+    warnings: [],
+  };
+
+  // ── helper: get indentation level ──
+  const indent = l => l.match(/^(\s*)/)[1].length;
+  const trimmed = l => l.replace(/^\s+/, '').replace(/\s*#.*$/, '').trim();
+
+  // ── 1) Detect display dimensions ─────────────────────────────────────────
+  // Looks for: dimensions: "WxH px" or width:/height: under display:
+  let inDisplay = false;
+  let dispW = null, dispH = null;
+  for (let i = 0; i < lines.length; i++) {
+    const t = trimmed(lines[i]);
+    if (/^display\s*:/.test(t)) { inDisplay = true; continue; }
+    if (inDisplay) {
+      if (indent(lines[i]) === 0 && t !== '') { inDisplay = false; continue; }
+      const dimMatch = t.match(/dimensions\s*:\s*["']?(\d+)\s*x\s*(\d+)/i);
+      if (dimMatch) { dispW = parseInt(dimMatch[1]); dispH = parseInt(dimMatch[2]); }
+      const wMatch = t.match(/^width\s*:\s*(\d+)/);
+      if (wMatch) dispW = parseInt(wMatch[1]);
+      const hMatch = t.match(/^height\s*:\s*(\d+)/);
+      if (hMatch) dispH = parseInt(hMatch[1]);
+    }
+  }
+  if (dispW && dispH) result.display = { width: dispW, height: dispH };
+
+  // ── 2) Extract lvgl > widgets > button ids ────────────────────────────────
+  // Strategy: find all "- button:" blocks anywhere in lvgl section,
+  // then grab their "id:" child.
+  const foundIds = new Set();
+  let inLvgl = false;
+  let inWidgets = false;
+  let inButtonBlock = false;
+  let buttonIndent = -1;
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const t = trimmed(raw);
+    const ind = indent(raw);
+
+    if (/^lvgl\s*:/.test(t)) { inLvgl = true; inWidgets = false; continue; }
+    if (inLvgl && ind === 0 && t !== '' && !/^lvgl/.test(t)) { inLvgl = false; }
+
+    if (inLvgl && /^widgets\s*:/.test(t)) { inWidgets = true; continue; }
+
+    if (inWidgets) {
+      // Detect "- button:" list item
+      if (/^-\s*button\s*:/.test(t) || t === 'button:') {
+        inButtonBlock = true;
+        buttonIndent = ind;
+        continue;
+      }
+      // Inside a button block, look for id:
+      if (inButtonBlock) {
+        if (ind <= buttonIndent && t.startsWith('-') && !/^-\s*button/.test(t)) {
+          inButtonBlock = false;
+        }
+        const idMatch = t.match(/^id\s*:\s*(\S+)/);
+        if (idMatch) {
+          foundIds.add(idMatch[1]);
+          inButtonBlock = false;
+        }
+      }
+    }
+  }
+
+  // Also do a broad scan for any "id:" under a button: context (more robust)
+  // We scan all lines for pattern: under "button:" indented block, find id:
+  let lastButtonLine = -1;
+  let lastButtonInd = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const t = trimmed(lines[i]);
+    const ind = indent(lines[i]);
+    if (/button\s*:/.test(t)) {
+      lastButtonLine = i;
+      lastButtonInd = ind;
+      continue;
+    }
+    if (lastButtonLine >= 0 && i - lastButtonLine <= 15 && ind > lastButtonInd) {
+      const idMatch = t.match(/^id\s*:\s*(\S+)/);
+      if (idMatch) {
+        foundIds.add(idMatch[1]);
+        lastButtonLine = -1;
+      }
+    }
+  }
+
+  result.buttons = Array.from(foundIds).map(id => ({ id, draggable: true }));
+
+  // ── 3) Extract existing draggable_grid config ─────────────────────────────
+  let inGrid = false;
+  let gridIndent = 0;
+  let gridSection = '';
+  let gridStart = -1;
+
+  for (let i = 0; i < lines.length; i++) {
+    const t = trimmed(lines[i]);
+    const ind = indent(lines[i]);
+    if (/^draggable_grid\s*:/.test(t)) {
+      inGrid = true; gridIndent = 0; gridStart = i;
+      gridSection = lines[i] + '\n';
+      continue;
+    }
+    if (inGrid) {
+      if (ind === 0 && t !== '') { inGrid = false; continue; }
+      gridSection += lines[i] + '\n';
+    }
+  }
+
+  if (gridSection) {
+    const gridLines = gridSection.split('\n');
+    let cw = null, ch = null;
+    const cells = [];
+    const gridBtns = [];
+    let inCells = false, inBtns = false;
+    let cellBuf = [];
+
+    for (let i = 0; i < gridLines.length; i++) {
+      const t = trimmed(gridLines[i]);
+      const ind = indent(gridLines[i]);
+
+      if (/^cell_w\s*:/.test(t)) { cw = parseInt(t.split(':')[1]); continue; }
+      if (/^cell_h\s*:/.test(t)) { ch = parseInt(t.split(':')[1]); continue; }
+      if (/^cells\s*:/.test(t))  { inCells = true; inBtns = false; cellBuf = []; continue; }
+      if (/^buttons\s*:/.test(t)){ inBtns = true; inCells = false; continue; }
+
+      if (inCells) {
+        if (ind <= 2 && t !== '' && !/^-/.test(t)) { inCells = false; }
+        else {
+          const numMatch = t.match(/^-\s*(\d+)/);
+          if (numMatch) { cellBuf.push(parseInt(numMatch[1])); }
+          if (cellBuf.length === 2) { cells.push([cellBuf[0], cellBuf[1]]); cellBuf = []; }
+        }
+      }
+
+      if (inBtns) {
+        if (ind <= 2 && t !== '' && !/^-/.test(t) && !/^id/.test(t) && !/^draggable/.test(t)) { inBtns = false; }
+        // Simple string entry
+        const simpleMatch = t.match(/^-\s+(\S+)$/);
+        if (simpleMatch && !simpleMatch[1].includes(':')) {
+          gridBtns.push({ id: simpleMatch[1], draggable: true });
+        }
+        // Dict entry with id:
+        const idMatch = t.match(/^id\s*:\s*(\S+)/);
+        if (idMatch) {
+          const last = gridBtns[gridBtns.length - 1];
+          if (last && !last.id) last.id = idMatch[1];
+          else gridBtns.push({ id: idMatch[1], draggable: true });
+        }
+        // draggable: false
+        if (/^draggable\s*:\s*false/.test(t) && gridBtns.length > 0) {
+          gridBtns[gridBtns.length - 1].draggable = false;
+        }
+        // New dict item
+        if (/^-\s*$/.test(t) || /^-\s*id/.test(t)) {
+          if (!/^-\s*id/.test(t)) gridBtns.push({ id: null, draggable: true });
+        }
+      }
+    }
+
+    if (cw && ch) {
+      result.grid = { cell_w: cw, cell_h: ch, cells, buttons: gridBtns };
+    }
+  }
+
+  return result;
+}
+
+// ─── Apply import result to state ────────────────────────────────────────────
+function applyImport(parsed) {
+  const res = document.getElementById('import-result');
+
+  // Display resolution
+  if (parsed.display) {
+    state.sw = parsed.display.width;
+    state.sh = parsed.display.height;
+    document.getElementById('sw').value = state.sw;
+    document.getElementById('sh').value = state.sh;
+    document.querySelectorAll('.preset-btn').forEach(b => {
+      b.classList.toggle('active',
+        parseInt(b.dataset.w) === state.sw && parseInt(b.dataset.h) === state.sh);
+    });
+  }
+
+  // If existing draggable_grid found → full import
+  if (parsed.grid && parsed.grid.buttons.length > 0) {
+    const gb = parsed.grid.buttons;
+    const n = gb.length;
+    const bestCols = Math.round(Math.sqrt(n));
+    const bestRows = Math.ceil(n / bestCols);
+    state.cols = Math.min(8, bestCols);
+    state.rows = Math.min(6, bestRows);
+    document.getElementById('cols').value = state.cols;
+    document.getElementById('rows').value = state.rows;
+    document.getElementById('cols-val').textContent = state.cols;
+    document.getElementById('rows-val').textContent = state.rows;
+
+    state.btnNames = gb.map((b,i) => b.id || `btn_${i+1}`);
+    state.pinned   = gb.map(b => !b.draggable);
+
+    let html = `<b>${t('import_ok_grid')}</b><br>${n} ${t('import_detected')}<br>`;
+    gb.forEach(b => {
+      html += `<span class="found-btn${b.draggable ? '' : ' pin'}">${b.id || '?'}${b.draggable ? '' : ' 📌'}</span>`;
+    });
+    res.className = 'import-result ok';
+    res.innerHTML = html;
+
+  } else if (parsed.buttons.length > 0) {
+    const btns = parsed.buttons;
+    const n = btns.length;
+    const bestCols = Math.min(8, Math.round(Math.sqrt(n)));
+    const bestRows = Math.min(6, Math.ceil(n / bestCols));
+    state.cols = bestCols;
+    state.rows = bestRows;
+    document.getElementById('cols').value = state.cols;
+    document.getElementById('rows').value = state.rows;
+    document.getElementById('cols-val').textContent = state.cols;
+    document.getElementById('rows-val').textContent = state.rows;
+
+    state.btnNames = btns.map(b => b.id);
+    state.pinned   = btns.map(() => false);
+
+    let html = `<b>${t('import_ok_lvgl').replace('{n}', n)}</b><br>`;
+    btns.forEach(b => {
+      html += `<span class="found-btn">${b.id}</span>`;
+    });
+    html += `<br><small style="color:var(--muted)">${t('import_no_grid')}</small>`;
+    res.className = 'import-result ok';
+    res.innerHTML = html;
+
+  } else {
+    res.className = 'import-result err';
+    res.innerHTML = `${t('import_err_none')}<br><small>${t('import_err_hint')}</small>`;
+    return;
+  }
+
+  renderCanvas();
+  renderBtnList();
+  renderYaml();
+}
+
+// ─── Upload zone events ───────────────────────────────────────────────────────
+function bindUpload() {
+  const zone = document.getElementById('upload-zone');
+  const fileInput = document.getElementById('yaml-file-input');
+
+  const handleFile = file => {
+    if (!file) return;
+    if (!file.name.match(/\.ya?ml$/i)) {
+      const res = document.getElementById('import-result');
+      res.className = 'import-result err';
+      res.innerHTML = t('import_err_type');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const parsed = parseEsphomeYaml(e.target.result);
+        applyImport(parsed);
+        zone.classList.remove('error');
+        zone.classList.add('success');
+      } catch(err) {
+        const res = document.getElementById('import-result');
+        res.className = 'import-result err';
+        res.innerHTML = `${t('import_err_read')}${err.message}`;
+        zone.classList.add('error');
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  fileInput.addEventListener('change', e => handleFile(e.target.files[0]));
+
+  zone.addEventListener('dragover', e => {
+    e.preventDefault();
+    zone.classList.add('drag-over');
+  });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault();
+    zone.classList.remove('drag-over');
+    handleFile(e.dataTransfer.files[0]);
+  });
+}
+
+
+function bindInputs() {
+  const bind = (id, key, isInt) => {
+    document.getElementById(id).addEventListener('input', e => {
+      state[key] = isInt ? parseInt(e.target.value) || 0 : e.target.value;
+      if (id === 'cols') document.getElementById('cols-val').textContent = state.cols;
+      if (id === 'rows') document.getElementById('rows-val').textContent = state.rows;
+      if (id === 'gap')  document.getElementById('gap-val').textContent  = state.gap;
+      if (id === 'margin') document.getElementById('margin-val').textContent = state.margin;
+      renderCanvas();
+      renderBtnList();
+      renderYaml();
+    });
+  };
+  bind('sw', 'sw', true);
+  bind('sh', 'sh', true);
+  bind('cols', 'cols', true);
+  bind('rows', 'rows', true);
+  bind('gap', 'gap', true);
+  bind('margin', 'margin', true);
+
+  // Presets
+  document.querySelectorAll('.preset-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      state.sw = parseInt(btn.dataset.w);
+      state.sh = parseInt(btn.dataset.h);
+      document.getElementById('sw').value = state.sw;
+      document.getElementById('sh').value = state.sh;
+      renderCanvas();
+      renderBtnList();
+      renderYaml();
+    });
+  });
+
+  // Copy
+  document.getElementById('copy-btn').addEventListener('click', () => {
+    navigator.clipboard.writeText(plainYaml()).then(() => {
+      const btn = document.getElementById('copy-btn');
+      btn.textContent = t('copy_done');
+      btn.classList.add('copied');
+      const toast = document.getElementById('toast');
+      toast.textContent = t('toast_msg');
+      toast.classList.add('show');
+      setTimeout(() => {
+        btn.textContent = t('copy_btn');
+        btn.classList.remove('copied');
+        toast.classList.remove('show');
+      }, 2000);
+    });
+  });
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+ensureBtnArrays();
+bindInputs();
+bindUpload();
+renderCanvas();
+renderBtnList();
+renderYaml();
+</script>
+</body>
+</html>
