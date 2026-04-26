@@ -5,11 +5,9 @@
 // l'utilisateur, et le YAML des boutons reste inchange.
 //
 // Gestuelle (v5) :
-//   - double clic sur un bouton      -> l'event LV_EVENT_PRESSED est
+//   - simple clic sur un bouton      -> l'event LV_EVENT_PRESSED est
 //                                       relaye au bouton -> on_press se
 //                                       declenche (ouvre la page).
-//   - simple clic sur un bouton      -> ne fait rien (evite les
-//                                       ouvertures accidentelles).
 //   - long-press sur un bouton       -> entre en "edit mode".
 //     (en edit mode)
 //   - drag d'un bouton               -> SWAP : le bouton survole echange
@@ -38,7 +36,7 @@
 //   Button (toujours NON-CLICKABLE : ne recoit plus d'event directement)
 //     +-- Overlay (enfant, TOUJOURS visible et clickable)
 //         Unique point d'entree pour toutes les interactions. Route
-//         soit vers double-click-relay, soit vers drag-edit selon
+//         soit vers simple-click-relay, soit vers drag-edit selon
 //         g_edit_mode.
 //
 // Etat
@@ -64,9 +62,6 @@ namespace draggable_grid {
 
 constexpr int MAX_BUTTONS = 16;
 
-// Fenetre maximum entre deux clics pour considerer un double-clic.
-constexpr uint32_t DOUBLE_CLICK_WINDOW_MS = 400;
-
 struct Cell { int16_t x; int16_t y; };
 
 // Geometrie configurable (mise a jour par le Component ESPHome au setup)
@@ -89,17 +84,13 @@ inline int8_t    g_active = -1;        // -1 = idle, sinon idx de bouton
 inline bool      g_moved = false;      // drag en cours si true
 inline bool      g_long_fired = false; // le press en cours a deja tire
                                        // LONG_PRESSED -> ignorer le
-                                       // relay double-click au RELEASED
+                                       // relay simple-click au RELEASED
 inline bool      g_edit_mode = false;
 
 // Parent scroll lock pendant le drag : l'indev LVGL peut sinon
 // convertir la gestuelle en scroll sur un ancetre scrollable.
 inline lv_obj_t* g_drag_parent = nullptr;
 inline bool      g_parent_was_scrollable = false;
-
-// Double-click tracking (un seul bouton a la fois peut etre en attente)
-inline int8_t    g_last_click_idx = -1;
-inline uint32_t  g_last_click_time = 0;
 
 // Cellule actuellement occupee par le bouton saisi (mise a jour pendant
 // le PRESSING). Sert a eviter de re-declencher un swap quand le doigt
@@ -264,7 +255,6 @@ inline void resume_all_breathe() {
 
 inline void set_edit_mode(bool enabled) {
   g_edit_mode = enabled;
-  g_last_click_idx = -1;   // reset double-click state au changement de mode
   for (int8_t i = 0; i < g_count; ++i) {
     lv_obj_t* btn = g_buttons[i];
     if (btn == nullptr) continue;
@@ -298,10 +288,9 @@ inline void overlay_event_cb(lv_event_t* e) {
   // En normal mode : entree en edit mode.
   if (code == LV_EVENT_LONG_PRESSED) {
     if (g_edit_mode && g_active == idx && g_moved) return;  // drag actif
-    g_long_fired = true;        // annule le relay double-click au RELEASED
+    g_long_fired = true;        // annule le relay simple-click au RELEASED
     g_active = -1;
     g_moved = false;
-    g_last_click_idx = -1;
     lv_obj_remove_state(btn, LV_STATE_PRESSED);  // propre cote visuel
     toggle_edit_mode();
     return;
@@ -370,30 +359,19 @@ inline void overlay_event_cb(lv_event_t* e) {
     if (g_active != idx) return;
     g_active = -1;
 
-    // ---- NORMAL MODE : double-click relay ---------------------------
+    // ---- NORMAL MODE : simple-click relay ---------------------------
     if (!g_edit_mode) {
       lv_obj_remove_state(btn, LV_STATE_PRESSED);
       const bool short_click =
           (code == LV_EVENT_RELEASED) && !g_moved && !g_long_fired;
       g_moved = false;
       g_long_fired = false;
-      if (!short_click) {
-        g_last_click_idx = -1;
-        return;
-      }
-      const uint32_t now = lv_tick_get();
-      if (g_last_click_idx == idx &&
-          (now - g_last_click_time) <= DOUBLE_CLICK_WINDOW_MS) {
-        // Second clic dans la fenetre -> relaye au bouton pour declencher
-        // le on_press: (et symetriquement RELEASED / CLICKED pour ne pas
-        // laisser le bouton dans un etat incoherent).
+      if (short_click) {
+        // Relaye PRESSED/RELEASED/CLICKED au bouton pour declencher
+        // on_press: et garder un etat coherent.
         lv_obj_send_event(btn, LV_EVENT_PRESSED, nullptr);
         lv_obj_send_event(btn, LV_EVENT_RELEASED, nullptr);
         lv_obj_send_event(btn, LV_EVENT_CLICKED, nullptr);
-        g_last_click_idx = -1;
-      } else {
-        g_last_click_idx = idx;
-        g_last_click_time = now;
       }
       return;
     }
@@ -423,7 +401,7 @@ inline void overlay_event_cb(lv_event_t* e) {
 
 // Enregistre un bouton :
 //  - draggable=true  : set_pos + overlay transparent enfant pour
-//                      intercepter toutes les interactions (double-clic
+//                      intercepter toutes les interactions (simple-clic
 //                      relay + drag en edit mode).
 //  - draggable=false : set_pos uniquement. Le bouton garde son
 //                      comportement YAML natif (on_press, on_long_press,
@@ -451,7 +429,7 @@ inline void attach(lv_obj_t* obj, int idx, int16_t cx, int16_t cy,
   }
 
   // Bouton non-clickable : plus jamais d'event direct. L'overlay est
-  // l'unique chemin vers le bouton (via lv_obj_send_event sur double
+  // l'unique chemin vers le bouton (via lv_obj_send_event sur simple
   // clic ou via un relay manuel d'etat LV_STATE_PRESSED).
   lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE);
 
