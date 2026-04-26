@@ -12,9 +12,13 @@
 //                                       ouvertures accidentelles).
 //   - long-press sur un bouton       -> entre en "edit mode".
 //     (en edit mode)
-//   - drag d'un bouton               -> REFLOW iOS : les autres widgets
-//                                       glissent pour combler la place
-//                                       pendant que le doigt bouge.
+//   - drag d'un bouton               -> SWAP : le bouton survole echange
+//                                       sa cellule avec le bouton drague.
+//                                       Aucun autre bouton ne bouge (le
+//                                       shift lineaire iOS-style donnait
+//                                       des deplacements parasites en
+//                                       drag vertical sur une grille
+//                                       multi-colonnes).
 //                                       Au lacher, le bouton se pose sur
 //                                       la derniere case survolee.
 //   - long-press sans bouger         -> sortie du edit mode.
@@ -97,11 +101,9 @@ inline bool      g_parent_was_scrollable = false;
 inline int8_t    g_last_click_idx = -1;
 inline uint32_t  g_last_click_time = 0;
 
-// Reflow : snapshot de la sequence de boutons au debut d'un drag, plus
-// le cell actuellement "occupe" par le bouton saisi (mis a jour pendant
-// le PRESSING). Permet de calculer la disposition reflowee a chaque
-// changement de case survolee.
-inline int8_t    g_pre_drag_order[MAX_BUTTONS]{};  // order[cell] = btn idx
+// Cellule actuellement occupee par le bouton saisi (mise a jour pendant
+// le PRESSING). Sert a eviter de re-declencher un swap quand le doigt
+// reste dans la meme case.
 inline int8_t    g_last_target_cell = -1;
 
 // --- helpers internes ---------------------------------------
@@ -172,60 +174,40 @@ inline void kill_pos_anim(int8_t btn_idx) {
   lv_anim_delete(&g_move_anims[btn_idx], anim_pos_exec_cb);
 }
 
-// Reflow : calcule la nouvelle disposition si le bouton saisi occupait
-// target_cell (en gardant l'ordre relatif des autres), puis anime les
-// voisins vers leurs nouvelles cellules. Les boutons pinned restent
-// dans leur cellule. g_cell_of / g_button_at sont mis a jour.
+// Swap pur : le bouton drague echange sa cellule avec l'occupant de
+// target_cell. Aucun autre bouton ne bouge.
+//
+// Pourquoi pas un shift lineaire iOS-style ? Le shift parcourt les
+// cellules dans l'ordre d'index : pour un drag horizontal sur une
+// grille multi-colonnes, les cellules adjacentes en index sont aussi
+// adjacentes a l'ecran, donc le shift ressemble a un swap. Mais pour
+// un drag vertical, target_cell est plusieurs index plus loin que
+// la cellule source, et toutes les cellules intermediaires (donc des
+// boutons sur d'autres lignes/colonnes) glissent inutilement.
+//
+// Si target_cell est occupee par un bouton pinne, on l'ignore : le
+// bouton pinne ne peut pas etre deplace, donc on n'echange rien.
 inline void reflow_to(int8_t dragged_idx, int8_t target_cell) {
   if (target_cell == g_last_target_cell) return;
   if (target_cell < 0) return;
   g_last_target_cell = target_cell;
 
-  int8_t new_order[MAX_BUTTONS];
-  for (int8_t c = 0; c < g_count; ++c) new_order[c] = -1;
+  const int8_t src_cell = g_cell_of[dragged_idx];
+  if (src_cell == target_cell) return;
 
-  // 1) cellules occupees par un bouton pinne : intouchables.
-  for (int8_t c = 0; c < g_count; ++c) {
-    int8_t occupant = g_button_at[c];
-    if (occupant >= 0 && g_pinned[occupant]) new_order[c] = occupant;
-  }
+  const int8_t target_occupant = g_button_at[target_cell];
+  if (target_occupant >= 0 && g_pinned[target_occupant]) return;
 
-  // 2) bouton drague : va explicitement sur target_cell.
-  new_order[target_cell] = dragged_idx;
+  g_button_at[target_cell] = dragged_idx;
+  g_cell_of[dragged_idx]   = target_cell;
 
-  // 3) reste : parcours du snapshot, on remplit les slots encore vides
-  //    dans l'ordre, en sautant drague + pinned.
-  int8_t write_src = 0;
-  for (int8_t c = 0; c < g_count; ++c) {
-    if (new_order[c] != -1) continue;
-    while (write_src < g_count) {
-      int8_t cand = g_pre_drag_order[write_src];
-      if (cand == dragged_idx || (cand >= 0 && g_pinned[cand])) {
-        ++write_src;
-        continue;
-      }
-      break;
-    }
-    if (write_src < g_count) new_order[c] = g_pre_drag_order[write_src++];
-  }
-
-  // Snapshot de g_cell_of avant l'application pour detecter les mouvements.
-  int8_t old_cell_of[MAX_BUTTONS];
-  for (int8_t i = 0; i < g_count; ++i) old_cell_of[i] = g_cell_of[i];
-
-  // Applique la nouvelle disposition.
-  for (int8_t c = 0; c < g_count; ++c) {
-    int8_t b = new_order[c];
-    if (b < 0 || b >= g_count) continue;
-    g_button_at[c] = b;
-    g_cell_of[b]   = c;
-  }
-
-  // Anime chaque voisin dont la cellule a change.
-  for (int8_t i = 0; i < g_count; ++i) {
-    if (i == dragged_idx) continue;
-    if (g_cell_of[i] == old_cell_of[i]) continue;
-    animate_btn_to(i, g_cells[g_cell_of[i]].x, g_cells[g_cell_of[i]].y);
+  if (target_occupant >= 0 && target_occupant != dragged_idx) {
+    g_button_at[src_cell]      = target_occupant;
+    g_cell_of[target_occupant] = src_cell;
+    animate_btn_to(target_occupant,
+                   g_cells[src_cell].x, g_cells[src_cell].y);
+  } else {
+    g_button_at[src_cell] = -1;
   }
 }
 
@@ -341,10 +323,6 @@ inline void overlay_event_cb(lv_event_t* e) {
       // Annule toute anim de position en cours sur les voisins / sur le
       // bouton saisi (qui suit le doigt 1:1).
       for (int8_t i = 0; i < g_count; ++i) kill_pos_anim(i);
-      // Snapshot de la sequence actuelle pour le reflow.
-      for (int8_t c = 0; c < g_count; ++c) {
-        g_pre_drag_order[c] = g_button_at[c];
-      }
       g_last_target_cell = g_cell_of[idx];
       // Bloque le scroll du parent pendant le drag : sinon un mouvement
       // vers le bas fait descendre tout l'affichage (LVGL convertit le
