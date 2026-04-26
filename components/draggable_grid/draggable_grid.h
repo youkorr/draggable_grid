@@ -325,6 +325,11 @@ inline void overlay_event_cb(lv_event_t* e) {
     } else {
       // Applique le style `pressed:` du YAML (translate_y, bg_color,...)
       lv_obj_add_state(btn, LV_STATE_PRESSED);
+      // Snappy : on relaie PRESSED tout de suite (au touch) plutot qu'au
+      // RELEASED. Le YAML on_press: declenche ainsi a l'instant ou le
+      // doigt touche, pas quand il se leve. Sans ca, on payait toute
+      // la duree du tap (80-200 ms) en latence perçue.
+      lv_obj_send_event(btn, LV_EVENT_PRESSED, nullptr);
     }
     return;
   }
@@ -367,9 +372,10 @@ inline void overlay_event_cb(lv_event_t* e) {
       g_moved = false;
       g_long_fired = false;
       if (short_click) {
-        // Relaye PRESSED/RELEASED/CLICKED au bouton pour declencher
-        // on_press: et garder un etat coherent.
-        lv_obj_send_event(btn, LV_EVENT_PRESSED, nullptr);
+        // PRESSED a deja ete relaye au moment du touch (cf. handler
+        // PRESSED ci-dessus) pour que on_press: soit instantane.
+        // Ici on complete juste la chaine d'events pour rester
+        // coherent (on_release, on_click).
         lv_obj_send_event(btn, LV_EVENT_RELEASED, nullptr);
         lv_obj_send_event(btn, LV_EVENT_CLICKED, nullptr);
       }
