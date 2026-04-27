@@ -68,12 +68,29 @@ struct Cell { int16_t x; int16_t y; };
 inline int16_t g_cell_w = 150;
 inline int16_t g_cell_h = 100;
 
+// --- Globaux configurables (toute la grille) ----------------------
+// Reflow : duree d'anim de remise en place des voisins lors d'un swap.
+inline uint32_t g_reflow_ms = 150;
+// Respiration en edit mode : amplitude (px), periode (ms), dephasage par idx (ms).
+inline int16_t  g_breathe_amplitude = -2;
+inline uint32_t g_breathe_period_ms = 1000;
+inline uint32_t g_breathe_phase_step_ms = 100;
+// Long-press sur tuile pour entrer en edit mode (false => seul l'action
+// externe `draggable_grid.toggle_edit_mode` peut basculer).
+inline bool g_long_press_to_edit = true;
+
 // Tables FIXES, indexees par identite de bouton (idx).
 inline lv_obj_t* g_buttons[MAX_BUTTONS]{};   // pointeur du bouton idx
 inline lv_obj_t* g_overlays[MAX_BUTTONS]{};  // pointeur de l'overlay idx
 inline Cell      g_cells[MAX_BUTTONS]{};     // position d'une cellule
 inline bool      g_pinned[MAX_BUTTONS]{};    // draggable=false : pas de
                                              // overlay, pas dans le reflow
+
+// --- Overrides par-bouton (resolus au YAML, defaut = global) ------
+inline bool     g_breathe[MAX_BUTTONS]{};                // anim respiration en edit mode
+inline bool     g_relay_press_immediate[MAX_BUTTONS]{};  // PRESSED relay au touch
+inline bool     g_apply_pressed_state[MAX_BUTTONS]{};    // ajout LV_STATE_PRESSED
+inline int16_t  g_lift_y[MAX_BUTTONS]{};                 // translate_y pendant le drag
 
 // Mappings courants cellule <-> bouton. Mis a jour uniquement au swap.
 inline int8_t    g_cell_of[MAX_BUTTONS]{};
@@ -133,9 +150,6 @@ inline void anim_pos_exec_cb(void* var, int32_t v) {
   lv_obj_set_pos(m->btn, x, y);
 }
 
-// Reflow en ~150 ms : snap mais visible, proche du feel iOS.
-constexpr uint32_t REFLOW_MS = 150;
-
 inline void animate_btn_to(int8_t btn_idx, int32_t dst_x, int32_t dst_y) {
   if (btn_idx < 0 || btn_idx >= MAX_BUTTONS) return;
   lv_obj_t* btn = g_buttons[btn_idx];
@@ -154,7 +168,7 @@ inline void animate_btn_to(int8_t btn_idx, int32_t dst_x, int32_t dst_y) {
   lv_anim_init(&a);
   lv_anim_set_var(&a, &m);
   lv_anim_set_exec_cb(&a, anim_pos_exec_cb);
-  lv_anim_set_time(&a, REFLOW_MS);
+  lv_anim_set_time(&a, g_reflow_ms);
   lv_anim_set_values(&a, 0, 1000);
   lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
   lv_anim_start(&a);
@@ -219,12 +233,12 @@ inline void start_breathe(lv_obj_t* btn, int8_t idx) {
   lv_anim_init(&a);
   lv_anim_set_var(&a, btn);
   lv_anim_set_exec_cb(&a, breathe_exec_cb);
-  lv_anim_set_time(&a, 1000);
-  lv_anim_set_playback_time(&a, 1000);
+  lv_anim_set_time(&a, g_breathe_period_ms);
+  lv_anim_set_playback_time(&a, g_breathe_period_ms);
   lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-  lv_anim_set_values(&a, 0, -2);
+  lv_anim_set_values(&a, 0, g_breathe_amplitude);
   lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
-  lv_anim_set_delay(&a, static_cast<uint32_t>(idx) * 100u);
+  lv_anim_set_delay(&a, static_cast<uint32_t>(idx) * g_breathe_phase_step_ms);
   lv_anim_start(&a);
 }
 
@@ -240,6 +254,7 @@ inline void stop_breathe(lv_obj_t* btn) {
 inline void pause_all_breathe() {
   for (int8_t i = 0; i < g_count; ++i) {
     if (g_pinned[i]) continue;
+    if (!g_breathe[i]) continue;
     stop_breathe(g_buttons[i]);
   }
 }
@@ -249,6 +264,7 @@ inline void pause_all_breathe() {
 inline void resume_all_breathe() {
   for (int8_t i = 0; i < g_count; ++i) {
     if (g_pinned[i]) continue;
+    if (!g_breathe[i]) continue;
     start_breathe(g_buttons[i], i);
   }
 }
@@ -259,6 +275,7 @@ inline void set_edit_mode(bool enabled) {
     lv_obj_t* btn = g_buttons[i];
     if (btn == nullptr) continue;
     if (g_pinned[i]) continue;  // les pinned ne respirent pas : pas draggables
+    if (!g_breathe[i]) continue;  // breathing desactive pour ce bouton
     if (enabled) {
       start_breathe(btn, i);
     } else {
@@ -285,13 +302,19 @@ inline void overlay_event_cb(lv_event_t* e) {
 
   // --- LONG_PRESSED -------------------------------------------------
   // En edit mode : sortie du edit mode (sauf si on est en plein drag).
-  // En normal mode : entree en edit mode.
+  // En normal mode : entree en edit mode (si g_long_press_to_edit).
   if (code == LV_EVENT_LONG_PRESSED) {
     if (g_edit_mode && g_active == idx && g_moved) return;  // drag actif
+    // Honorer la config : si l'edit mode est externalise (bouton dedie),
+    // on laisse passer le long-press sans rien faire ici. La sortie de
+    // edit mode reste possible via long-press tile (utile par defaut).
+    if (!g_edit_mode && !g_long_press_to_edit) return;
     g_long_fired = true;        // annule le relay simple-click au RELEASED
     g_active = -1;
     g_moved = false;
-    lv_obj_remove_state(btn, LV_STATE_PRESSED);  // propre cote visuel
+    if (g_apply_pressed_state[idx]) {
+      lv_obj_remove_state(btn, LV_STATE_PRESSED);  // propre cote visuel
+    }
     toggle_edit_mode();
     return;
   }
@@ -306,9 +329,10 @@ inline void overlay_event_cb(lv_event_t* e) {
       // PPA pendant le drag + reflow (gain majeur sur ESP32-P4).
       pause_all_breathe();
       // Lift visuel du bouton saisi : translate_y pure, pas de scale,
-      // donc reste dans le chemin rapide PPA.
+      // donc reste dans le chemin rapide PPA. Amplitude configurable
+      // par bouton (g_lift_y).
       lv_obj_move_foreground(btn);
-      lv_obj_set_style_translate_y(btn, -6, LV_PART_MAIN);
+      lv_obj_set_style_translate_y(btn, g_lift_y[idx], LV_PART_MAIN);
       // Annule toute anim de position en cours sur les voisins / sur le
       // bouton saisi (qui suit le doigt 1:1).
       for (int8_t i = 0; i < g_count; ++i) kill_pos_anim(i);
@@ -323,13 +347,17 @@ inline void overlay_event_cb(lv_event_t* e) {
         lv_obj_clear_flag(g_drag_parent, LV_OBJ_FLAG_SCROLLABLE);
       }
     } else {
-      // Applique le style `pressed:` du YAML (translate_y, bg_color,...)
-      lv_obj_add_state(btn, LV_STATE_PRESSED);
-      // Snappy : on relaie PRESSED tout de suite (au touch) plutot qu'au
-      // RELEASED. Le YAML on_press: declenche ainsi a l'instant ou le
-      // doigt touche, pas quand il se leve. Sans ca, on payait toute
-      // la duree du tap (80-200 ms) en latence perçue.
-      lv_obj_send_event(btn, LV_EVENT_PRESSED, nullptr);
+      // Visuel : applique le style `pressed:` du YAML si le widget en
+      // a un (configurable, certains widgets/themes n'en definissent pas).
+      if (g_apply_pressed_state[idx]) {
+        lv_obj_add_state(btn, LV_STATE_PRESSED);
+      }
+      // Snappy : si activé, on relaie PRESSED au touch (au lieu de la
+      // release) pour que on_press: soit instantane. Sinon comportement
+      // historique (relay au RELEASED, voir branche ci-dessous).
+      if (g_relay_press_immediate[idx]) {
+        lv_obj_send_event(btn, LV_EVENT_PRESSED, nullptr);
+      }
     }
     return;
   }
@@ -366,16 +394,20 @@ inline void overlay_event_cb(lv_event_t* e) {
 
     // ---- NORMAL MODE : simple-click relay ---------------------------
     if (!g_edit_mode) {
-      lv_obj_remove_state(btn, LV_STATE_PRESSED);
+      if (g_apply_pressed_state[idx]) {
+        lv_obj_remove_state(btn, LV_STATE_PRESSED);
+      }
       const bool short_click =
           (code == LV_EVENT_RELEASED) && !g_moved && !g_long_fired;
       g_moved = false;
       g_long_fired = false;
       if (short_click) {
-        // PRESSED a deja ete relaye au moment du touch (cf. handler
-        // PRESSED ci-dessus) pour que on_press: soit instantane.
-        // Ici on complete juste la chaine d'events pour rester
-        // coherent (on_release, on_click).
+        // Si PRESSED n'a PAS ete relaye au touch (mode legacy), on le
+        // relaie maintenant. Sinon on a deja envoye PRESSED au touch et
+        // on complete simplement la chaine RELEASED + CLICKED.
+        if (!g_relay_press_immediate[idx]) {
+          lv_obj_send_event(btn, LV_EVENT_PRESSED, nullptr);
+        }
         lv_obj_send_event(btn, LV_EVENT_RELEASED, nullptr);
         lv_obj_send_event(btn, LV_EVENT_CLICKED, nullptr);
       }
@@ -405,16 +437,28 @@ inline void overlay_event_cb(lv_event_t* e) {
   }
 }
 
-// Enregistre un bouton :
+// Options par-bouton resolues depuis le YAML (defaut = comportement
+// historique). Tout est explicite pour qu'un widget custom (panneau,
+// image, obj...) puisse etre integre dans la grille sans hypothese
+// implicite sur ses styles.
+struct AttachOptions {
+  bool    draggable             = true;
+  bool    breathe               = true;   // anim respiration en edit mode
+  bool    relay_press_immediate = true;   // PRESSED relay au touch (snappy)
+  bool    apply_pressed_state   = true;   // ajout LV_STATE_PRESSED en normal mode
+  int16_t lift_y                = -6;     // translate_y pendant le drag
+};
+
+// Enregistre un widget (n'importe quel lv_obj_t) :
 //  - draggable=true  : set_pos + overlay transparent enfant pour
 //                      intercepter toutes les interactions (simple-clic
 //                      relay + drag en edit mode).
-//  - draggable=false : set_pos uniquement. Le bouton garde son
+//  - draggable=false : set_pos uniquement. Le widget garde son
 //                      comportement YAML natif (on_press, on_long_press,
 //                      etc.), il sert de slot "pinne" que le reflow
 //                      ne touchera pas.
 inline void attach(lv_obj_t* obj, int idx, int16_t cx, int16_t cy,
-                   bool draggable = true) {
+                   AttachOptions opts = {}) {
   if (obj == nullptr) return;
   if (idx < 0 || idx >= MAX_BUTTONS) return;
 
@@ -423,13 +467,17 @@ inline void attach(lv_obj_t* obj, int idx, int16_t cx, int16_t cy,
   g_buttons[idx] = obj;
   g_cell_of[idx] = idx;
   g_button_at[idx] = idx;
-  g_pinned[idx]  = !draggable;
+  g_pinned[idx]  = !opts.draggable;
+  g_breathe[idx] = opts.breathe;
+  g_relay_press_immediate[idx] = opts.relay_press_immediate;
+  g_apply_pressed_state[idx]   = opts.apply_pressed_state;
+  g_lift_y[idx]                = opts.lift_y;
   if (idx + 1 > g_count) g_count = idx + 1;
   lv_obj_set_pos(obj, cx, cy);
 
-  // Bouton pinne : on n'installe PAS d'overlay, on ne touche pas a
-  // CLICKABLE. L'utilisateur garde on_press / on_long_press YAML natif.
-  if (!draggable) {
+  // Pinne : on n'installe PAS d'overlay, on ne touche pas a CLICKABLE.
+  // L'utilisateur garde on_press / on_long_press YAML natif sur le widget.
+  if (!opts.draggable) {
     g_overlays[idx] = nullptr;
     return;
   }
@@ -464,6 +512,12 @@ inline void set_cell_size(int w, int h) {
   g_cell_h = static_cast<int16_t>(h);
 }
 
+inline void set_reflow_ms(uint32_t ms)            { g_reflow_ms = ms; }
+inline void set_breathe_amplitude(int16_t px)     { g_breathe_amplitude = px; }
+inline void set_breathe_period_ms(uint32_t ms)    { g_breathe_period_ms = ms; }
+inline void set_breathe_phase_step_ms(uint32_t ms){ g_breathe_phase_step_ms = ms; }
+inline void set_long_press_to_edit(bool enabled)  { g_long_press_to_edit = enabled; }
+
 }  // namespace draggable_grid
 
 
@@ -478,29 +532,57 @@ struct PendingEntry {
   int8_t    idx;
   int16_t   x;
   int16_t   y;
-  bool      draggable;
+  ::draggable_grid::AttachOptions opts;
 };
 
 class DraggableGridComponent : public Component {
  public:
+  // Surcharges :
+  //  - add(obj, idx, x, y) : tout par defaut
+  //  - add(obj, idx, x, y, draggable) : compat ascendante
+  //  - add(obj, idx, x, y, draggable, breathe, relay_press_immediate,
+  //        apply_pressed_state, lift_y) : full per-button
+  void add(lv_obj_t* obj, int idx, int16_t x, int16_t y) {
+    this->add_full_(obj, idx, x, y, ::draggable_grid::AttachOptions{});
+  }
+  void add(lv_obj_t* obj, int idx, int16_t x, int16_t y, bool draggable) {
+    ::draggable_grid::AttachOptions o;
+    o.draggable = draggable;
+    this->add_full_(obj, idx, x, y, o);
+  }
   void add(lv_obj_t* obj, int idx, int16_t x, int16_t y,
-           bool draggable = true) {
-    if (this->count_ >= ::draggable_grid::MAX_BUTTONS) return;
-    this->entries_[this->count_++] =
-        {obj, static_cast<int8_t>(idx), x, y, draggable};
+           bool draggable, bool breathe, bool relay_press_immediate,
+           bool apply_pressed_state, int16_t lift_y) {
+    ::draggable_grid::AttachOptions o;
+    o.draggable             = draggable;
+    o.breathe               = breathe;
+    o.relay_press_immediate = relay_press_immediate;
+    o.apply_pressed_state   = apply_pressed_state;
+    o.lift_y                = lift_y;
+    this->add_full_(obj, idx, x, y, o);
   }
 
   void set_cell_size(int w, int h) {
     this->cell_w_ = static_cast<int16_t>(w);
     this->cell_h_ = static_cast<int16_t>(h);
   }
+  void set_reflow_ms(uint32_t ms)             { this->reflow_ms_ = ms; }
+  void set_breathe_amplitude(int16_t px)      { this->breathe_amplitude_ = px; }
+  void set_breathe_period_ms(uint32_t ms)     { this->breathe_period_ms_ = ms; }
+  void set_breathe_phase_step_ms(uint32_t ms) { this->breathe_phase_step_ms_ = ms; }
+  void set_long_press_to_edit(bool enabled)   { this->long_press_to_edit_ = enabled; }
 
   void setup() override {
     ::draggable_grid::set_cell_size(this->cell_w_, this->cell_h_);
+    ::draggable_grid::set_reflow_ms(this->reflow_ms_);
+    ::draggable_grid::set_breathe_amplitude(this->breathe_amplitude_);
+    ::draggable_grid::set_breathe_period_ms(this->breathe_period_ms_);
+    ::draggable_grid::set_breathe_phase_step_ms(this->breathe_phase_step_ms_);
+    ::draggable_grid::set_long_press_to_edit(this->long_press_to_edit_);
     for (int i = 0; i < this->count_; ++i) {
       auto& e = this->entries_[i];
       if (e.obj != nullptr) {
-        ::draggable_grid::attach(e.obj, e.idx, e.x, e.y, e.draggable);
+        ::draggable_grid::attach(e.obj, e.idx, e.x, e.y, e.opts);
       }
     }
   }
@@ -517,10 +599,22 @@ class DraggableGridComponent : public Component {
   }
 
  private:
+  void add_full_(lv_obj_t* obj, int idx, int16_t x, int16_t y,
+                 const ::draggable_grid::AttachOptions& o) {
+    if (this->count_ >= ::draggable_grid::MAX_BUTTONS) return;
+    this->entries_[this->count_++] =
+        {obj, static_cast<int8_t>(idx), x, y, o};
+  }
+
   PendingEntry entries_[::draggable_grid::MAX_BUTTONS]{};
-  int8_t  count_ = 0;
-  int16_t cell_w_ = 150;
-  int16_t cell_h_ = 100;
+  int8_t   count_ = 0;
+  int16_t  cell_w_ = 150;
+  int16_t  cell_h_ = 100;
+  uint32_t reflow_ms_ = 150;
+  int16_t  breathe_amplitude_ = -2;
+  uint32_t breathe_period_ms_ = 1000;
+  uint32_t breathe_phase_step_ms_ = 100;
+  bool     long_press_to_edit_ = true;
 };
 
 // ------------------------------------------------------------

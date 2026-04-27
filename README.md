@@ -14,10 +14,15 @@ No YAML lambdas are required.
 ## Features
 
 - **Declarative YAML configuration**
+- **Works with any LVGL widget** (button, obj, image, panneau custom...) -
+  the schema validates any `lv_obj_base_t`, not only buttons
 - **Drag and reorder buttons in edit mode**
 - **iOS-style live reflow** while dragging
 - **Pinned buttons** with `draggable: false`
 - **External actions** to toggle or set edit mode from any trigger
+- **Fully configurable** : reflow timing, breathing animation, drag lift,
+  press-relay timing and pressed-state visual are all overridable globally
+  or per-button
 - Stable button identity during reordering
 - No user-side lambdas
 
@@ -82,7 +87,8 @@ Each entry in `buttons:` supports two formats.
 
 ### Short form
 
-By default, the button is draggable.
+By default, the widget is draggable and inherits all per-button options
+from the grid.
 
 ```yaml
 buttons:
@@ -92,7 +98,8 @@ buttons:
 
 ### Dictionary form
 
-Use this form to explicitly configure `draggable`.
+Use this form to override any per-button option for that widget. Any
+option you do **not** set inherits its value from the grid level.
 
 ```yaml
 buttons:
@@ -100,6 +107,71 @@ buttons:
     draggable: true
   - id: btn_settings
     draggable: false
+  - id: panel_chart           # works with any LVGL widget, not only buttons
+    breathe: false            # do not animate this tile in edit mode
+    relay_press_immediate: false   # use the on-release press relay (legacy)
+    apply_pressed_state: false     # do not toggle LV_STATE_PRESSED
+    lift_y: -10                    # bigger drag lift for this tile
+```
+
+---
+
+## Configurable behaviour
+
+All animation timings and per-button feedback flags can be set globally on
+the grid and overridden per button. Defaults reproduce the historical
+iOS-like feel.
+
+### Grid-level options
+
+| Option                    | Default | Description |
+|---------------------------|---------|-------------|
+| `reflow_ms`               | `150`   | Duration (ms) of the neighbour reflow animation when a swap happens. |
+| `breathe_amplitude`       | `-2`    | Translate-y amplitude (px) of the edit-mode breathing animation. Negative = up. |
+| `breathe_period_ms`       | `1000`  | Period (ms, full A/R) of the breathing animation. |
+| `breathe_phase_step_ms`   | `100`   | Per-tile phase delay (ms * idx) so neighbours breathe out of sync. Set to `0` for synchronous breathing. |
+| `long_press_to_edit`      | `true`  | Long-pressing a draggable tile enters edit mode. Set `false` if you trigger edit mode from a dedicated button. |
+
+### Per-button defaults (set on the grid, override per entry)
+
+| Option                  | Default | Description |
+|-------------------------|---------|-------------|
+| `breathe`               | `true`  | Animate this tile in edit mode. |
+| `relay_press_immediate` | `true`  | Relay `LV_EVENT_PRESSED` to the widget at touch time (snappy `on_press:`). Set `false` to relay on release (historical behaviour). |
+| `apply_pressed_state`   | `true`  | Toggle `LV_STATE_PRESSED` on press / release (drives the `pressed:` style block). Set `false` for widgets without a `pressed:` style. |
+| `lift_y`                | `-6`    | Translate-y (px) applied to the tile while it is being dragged. |
+
+### Example
+
+```yaml
+draggable_grid:
+  id: my_grid
+  cell_w: 150
+  cell_h: 100
+
+  # global animation tuning
+  reflow_ms: 120
+  breathe_amplitude: -3
+  breathe_period_ms: 1200
+  breathe_phase_step_ms: 80
+  long_press_to_edit: false      # use a dedicated edit-mode button
+
+  # per-button defaults applied to every entry
+  relay_press_immediate: true
+  apply_pressed_state: true
+  lift_y: -8
+
+  cells:
+    - [10, 220]
+    - [200, 220]
+    - [380, 220]
+  buttons:
+    - btn_light
+    - id: btn_alarm
+      lift_y: -12               # this tile lifts more
+    - id: panel_chart
+      apply_pressed_state: false
+      breathe: false
 ```
 
 ---
@@ -251,6 +323,8 @@ Pinned buttons remain fixed and are excluded from reflow.
 - Pinned buttons keep their original event handling
 - Draggable buttons use an overlay for interaction routing
 - The component depends on the ESPHome `lvgl` integration
+- The schema validates any `lv_obj_base_t`, so non-button widgets (image,
+  obj panel, custom composition...) can be placed in the grid as well
 
 ---
 
