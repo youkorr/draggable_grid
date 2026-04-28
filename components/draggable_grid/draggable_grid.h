@@ -4,19 +4,24 @@
 // 100% declaratif cote YAML : aucune lambda ne doit etre ecrite par
 // l'utilisateur, et le YAML des boutons reste inchange.
 //
-// Gestuelle (v5) :
-//   - simple clic sur un bouton      -> l'event LV_EVENT_PRESSED est
-//                                       relaye au bouton -> on_press se
-//                                       declenche (ouvre la page).
-//   - long-press sur un bouton       -> entre en "edit mode".
+// Gestuelle (v6) :
+//   - tap / clic / etc. sur un bouton -> NATIF : le bouton garde sa
+//                                       flag CLICKABLE et tous les
+//                                       evenements LVGL (LV_EVENT_PRESSED,
+//                                       LV_EVENT_CLICKED, LV_EVENT_RELEASED,
+//                                       LV_EVENT_SHORT_CLICKED, etc.) sont
+//                                       declenches. Le YAML on_press,
+//                                       on_click, on_short_click,
+//                                       on_value_changed... fonctionne
+//                                       comme avec un button LVGL standard.
+//                                       Le style `pressed:` aussi : LVGL
+//                                       applique LV_STATE_PRESSED tout seul.
+//   - long-press sur un bouton       -> entre en "edit mode" (en plus
+//                                       du on_long_press YAML eventuel).
 //     (en edit mode)
 //   - drag d'un bouton               -> SWAP : le bouton survole echange
 //                                       sa cellule avec le bouton drague.
-//                                       Aucun autre bouton ne bouge (le
-//                                       shift lineaire iOS-style donnait
-//                                       des deplacements parasites en
-//                                       drag vertical sur une grille
-//                                       multi-colonnes).
+//                                       Aucun autre bouton ne bouge.
 //                                       Au lacher, le bouton se pose sur
 //                                       la derniere case survolee.
 //   - long-press sans bouger         -> sortie du edit mode.
@@ -33,11 +38,16 @@
 //
 // Architecture
 // ------------
-//   Button (toujours NON-CLICKABLE : ne recoit plus d'event directement)
-//     +-- Overlay (enfant, TOUJOURS visible et clickable)
-//         Unique point d'entree pour toutes les interactions. Route
-//         soit vers simple-click-relay, soit vers drag-edit selon
-//         g_edit_mode.
+//   Button (toujours CLICKABLE -> tous les events LVGL natifs passent)
+//     +-- Overlay (enfant, transparent)
+//         CLICKABLE seulement quand g_edit_mode == true.
+//         En edit mode, intercepte tous les events (drag, long-press
+//         pour sortir), ce qui empeche le bouton de recevoir on_press
+//         et evite donc la navigation accidentelle pendant le drag.
+//         En mode normal, l'overlay laisse passer les events au bouton.
+//         Le LONG_PRESSED qui declenche l'entree en edit mode est ecoute
+//         directement sur le bouton (un handler LVGL co-existe avec
+//         le on_long_press YAML).
 //
 // Etat
 // ----
@@ -82,9 +92,6 @@ inline int8_t    g_button_at[MAX_BUTTONS]{};
 inline int8_t    g_count = 0;
 inline int8_t    g_active = -1;        // -1 = idle, sinon idx de bouton
 inline bool      g_moved = false;      // drag en cours si true
-inline bool      g_long_fired = false; // le press en cours a deja tire
-                                       // LONG_PRESSED -> ignorer le
-                                       // relay simple-click au RELEASED
 inline bool      g_edit_mode = false;
 
 // Parent scroll lock pendant le drag : l'indev LVGL peut sinon
@@ -264,13 +271,40 @@ inline void set_edit_mode(bool enabled) {
     } else {
       stop_breathe(btn);
     }
+    // L'overlay devient clickable seulement en edit mode : il intercepte
+    // les events pour le drag/long-press-de-sortie. En mode normal, il
+    // laisse passer les events au bouton (-> on_press, on_click, etc.
+    // YAML natifs).
+    lv_obj_t* ov = g_overlays[i];
+    if (ov == nullptr) continue;
+    if (enabled) {
+      lv_obj_add_flag(ov, LV_OBJ_FLAG_CLICKABLE);
+    } else {
+      lv_obj_clear_flag(ov, LV_OBJ_FLAG_CLICKABLE);
+    }
   }
 }
 
 inline void toggle_edit_mode() { set_edit_mode(!g_edit_mode); }
 
-// Callback attache A L'OVERLAY (toujours visible). Unique point
-// d'entree pour toutes les interactions utilisateur.
+// Callback attache au BOUTON. Unique role : detecter un long-press en
+// mode normal pour entrer en edit mode. Co-existe avec un eventuel
+// on_long_press: declare en YAML par l'utilisateur (les deux handlers
+// LVGL fireront).
+inline void button_long_press_cb(lv_event_t* e) {
+  if (g_edit_mode) return;  // en edit mode, c'est l'overlay qui gere
+  toggle_edit_mode();
+  // Apres l'entree en edit mode, on ne veut pas que la liberation du
+  // doigt fasse encore tirer LV_EVENT_CLICKED / LV_EVENT_SHORT_CLICKED
+  // sur le bouton (ce qui declencherait par exemple on_click avec
+  // navigation de page alors que l'utilisateur voulait juste basculer).
+  lv_indev_t* indev = lv_indev_active();
+  if (indev != nullptr) lv_indev_wait_release(indev);
+}
+
+// Callback attache A L'OVERLAY. L'overlay est CLICKABLE seulement en
+// edit mode, donc ce handler ne s'execute jamais en mode normal :
+// le bouton recoit ses events nativement (on_press, on_click, etc.).
 //
 // user_data = identite STABLE du bouton (idx d'origine a l'attach).
 // Apres un swap, g_buttons[idx] et g_overlays[idx] ne changent PAS ;
@@ -283,55 +317,44 @@ inline void overlay_event_cb(lv_event_t* e) {
   lv_obj_t* btn = g_buttons[idx];
   if (btn == nullptr) return;
 
-  // --- LONG_PRESSED -------------------------------------------------
-  // En edit mode : sortie du edit mode (sauf si on est en plein drag).
-  // En normal mode : entree en edit mode.
+  // --- LONG_PRESSED : sortie du edit mode (sauf en plein drag) -----
   if (code == LV_EVENT_LONG_PRESSED) {
-    if (g_edit_mode && g_active == idx && g_moved) return;  // drag actif
-    g_long_fired = true;        // annule le relay simple-click au RELEASED
+    if (g_active == idx && g_moved) return;  // drag actif
     g_active = -1;
     g_moved = false;
-    lv_obj_remove_state(btn, LV_STATE_PRESSED);  // propre cote visuel
     toggle_edit_mode();
     return;
   }
 
-  // --- PRESSED ------------------------------------------------------
+  // --- PRESSED : prepare le drag ------------------------------------
   if (code == LV_EVENT_PRESSED) {
     g_active = idx;
     g_moved = false;
-    g_long_fired = false;
-    if (g_edit_mode) {
-      // Coupe TOUTES les anims de respiration pour liberer le pipeline
-      // PPA pendant le drag + reflow (gain majeur sur ESP32-P4).
-      pause_all_breathe();
-      // Lift visuel du bouton saisi : translate_y pure, pas de scale,
-      // donc reste dans le chemin rapide PPA.
-      lv_obj_move_foreground(btn);
-      lv_obj_set_style_translate_y(btn, -6, LV_PART_MAIN);
-      // Annule toute anim de position en cours sur les voisins / sur le
-      // bouton saisi (qui suit le doigt 1:1).
-      for (int8_t i = 0; i < g_count; ++i) kill_pos_anim(i);
-      g_last_target_cell = g_cell_of[idx];
-      // Bloque le scroll du parent pendant le drag : sinon un mouvement
-      // vers le bas fait descendre tout l'affichage (LVGL convertit le
-      // geste en scroll sur l'ancetre scrollable).
-      g_drag_parent = lv_obj_get_parent(btn);
-      if (g_drag_parent != nullptr) {
-        g_parent_was_scrollable =
-            lv_obj_has_flag(g_drag_parent, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_clear_flag(g_drag_parent, LV_OBJ_FLAG_SCROLLABLE);
-      }
-    } else {
-      // Applique le style `pressed:` du YAML (translate_y, bg_color,...)
-      lv_obj_add_state(btn, LV_STATE_PRESSED);
+    // Coupe TOUTES les anims de respiration pour liberer le pipeline
+    // PPA pendant le drag + reflow (gain majeur sur ESP32-P4).
+    pause_all_breathe();
+    // Lift visuel du bouton saisi : translate_y pure, pas de scale,
+    // donc reste dans le chemin rapide PPA.
+    lv_obj_move_foreground(btn);
+    lv_obj_set_style_translate_y(btn, -6, LV_PART_MAIN);
+    // Annule toute anim de position en cours sur les voisins / sur le
+    // bouton saisi (qui suit le doigt 1:1).
+    for (int8_t i = 0; i < g_count; ++i) kill_pos_anim(i);
+    g_last_target_cell = g_cell_of[idx];
+    // Bloque le scroll du parent pendant le drag : sinon un mouvement
+    // vers le bas fait descendre tout l'affichage (LVGL convertit le
+    // geste en scroll sur l'ancetre scrollable).
+    g_drag_parent = lv_obj_get_parent(btn);
+    if (g_drag_parent != nullptr) {
+      g_parent_was_scrollable =
+          lv_obj_has_flag(g_drag_parent, LV_OBJ_FLAG_SCROLLABLE);
+      lv_obj_clear_flag(g_drag_parent, LV_OBJ_FLAG_SCROLLABLE);
     }
     return;
   }
 
-  // --- PRESSING (drag + reflow en edit mode uniquement) -------------
+  // --- PRESSING : drag + reflow ------------------------------------
   if (code == LV_EVENT_PRESSING) {
-    if (!g_edit_mode) return;
     if (g_active != idx) return;
     lv_indev_t* indev = lv_indev_active();
     if (indev == nullptr) return;
@@ -354,31 +377,11 @@ inline void overlay_event_cb(lv_event_t* e) {
     return;
   }
 
-  // --- RELEASED / PRESS_LOST ----------------------------------------
+  // --- RELEASED / PRESS_LOST : drop --------------------------------
   if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
     if (g_active != idx) return;
     g_active = -1;
-
-    // ---- NORMAL MODE : simple-click relay ---------------------------
-    if (!g_edit_mode) {
-      lv_obj_remove_state(btn, LV_STATE_PRESSED);
-      const bool short_click =
-          (code == LV_EVENT_RELEASED) && !g_moved && !g_long_fired;
-      g_moved = false;
-      g_long_fired = false;
-      if (short_click) {
-        // Relaye PRESSED/RELEASED/CLICKED au bouton pour declencher
-        // on_press: et garder un etat coherent.
-        lv_obj_send_event(btn, LV_EVENT_PRESSED, nullptr);
-        lv_obj_send_event(btn, LV_EVENT_RELEASED, nullptr);
-        lv_obj_send_event(btn, LV_EVENT_CLICKED, nullptr);
-      }
-      return;
-    }
-
-    // ---- EDIT MODE : fin du drag (reflow deja applique pdt PRESSING) -
     g_moved = false;
-    g_long_fired = false;
     g_last_target_cell = -1;
 
     // Le bouton saisi se pose anime sur la case finale (celle deja
@@ -400,13 +403,16 @@ inline void overlay_event_cb(lv_event_t* e) {
 }
 
 // Enregistre un bouton :
-//  - draggable=true  : set_pos + overlay transparent enfant pour
-//                      intercepter toutes les interactions (simple-clic
-//                      relay + drag en edit mode).
+//  - draggable=true  : set_pos + handler LONG_PRESSED sur le bouton (pour
+//                      basculer en edit mode) + overlay transparent enfant
+//                      qui sera clickable seulement en edit mode (pour
+//                      intercepter le drag). En mode normal le bouton
+//                      garde TOUS ses events LVGL natifs : on_press,
+//                      on_click, on_short_click, on_value_changed, etc.
+//                      fonctionnent comme avec un button LVGL standard.
 //  - draggable=false : set_pos uniquement. Le bouton garde son
-//                      comportement YAML natif (on_press, on_long_press,
-//                      etc.), il sert de slot "pinne" que le reflow
-//                      ne touchera pas.
+//                      comportement YAML natif, il sert de slot "pinne"
+//                      que le reflow ne touchera pas.
 inline void attach(lv_obj_t* obj, int idx, int16_t cx, int16_t cy,
                    bool draggable = true) {
   if (obj == nullptr) return;
@@ -421,19 +427,23 @@ inline void attach(lv_obj_t* obj, int idx, int16_t cx, int16_t cy,
   if (idx + 1 > g_count) g_count = idx + 1;
   lv_obj_set_pos(obj, cx, cy);
 
-  // Bouton pinne : on n'installe PAS d'overlay, on ne touche pas a
-  // CLICKABLE. L'utilisateur garde on_press / on_long_press YAML natif.
+  // Bouton pinne : on n'installe PAS d'overlay, on ne touche a rien.
   if (!draggable) {
     g_overlays[idx] = nullptr;
     return;
   }
 
-  // Bouton non-clickable : plus jamais d'event direct. L'overlay est
-  // l'unique chemin vers le bouton (via lv_obj_send_event sur simple
-  // clic ou via un relay manuel d'etat LV_STATE_PRESSED).
-  lv_obj_clear_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+  // On garde le bouton CLICKABLE : tous ses events LVGL (PRESSED, CLICKED,
+  // SHORT_CLICKED, RELEASED, VALUE_CHANGED, ...) continuent de partir
+  // nativement vers les triggers YAML. On ajoute simplement un listener
+  // LONG_PRESSED pour basculer en edit mode (cohabite avec un eventuel
+  // on_long_press: YAML).
+  lv_obj_add_event_cb(obj, button_long_press_cb, LV_EVENT_LONG_PRESSED,
+                      reinterpret_cast<void*>(static_cast<intptr_t>(idx)));
 
-  // Overlay transparent enfant, TOUJOURS visible et clickable.
+  // Overlay transparent enfant. Initialement NON-clickable : il laisse
+  // passer les events au bouton (mode normal). set_edit_mode() bascule
+  // sa flag CLICKABLE pour intercepter les events pendant l'edit mode.
   lv_obj_t* ov = lv_obj_create(obj);
   lv_obj_remove_style_all(ov);
   lv_obj_set_size(ov, LV_PCT(100), LV_PCT(100));
@@ -442,7 +452,7 @@ inline void attach(lv_obj_t* obj, int idx, int16_t cx, int16_t cy,
   lv_obj_set_style_border_width(ov, 0, 0);
   lv_obj_set_style_pad_all(ov, 0, 0);
   lv_obj_set_style_radius(ov, 0, 0);
-  lv_obj_add_flag(ov, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(ov, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_flag(ov, LV_OBJ_FLAG_PRESS_LOCK);
   lv_obj_clear_flag(ov, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_clear_flag(ov, LV_OBJ_FLAG_EVENT_BUBBLE);
