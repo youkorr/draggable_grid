@@ -17,58 +17,156 @@
 //                                       des deplacements parasites en
 //                                       drag vertical sur une grille
 //                                       multi-colonnes).
-//   - drag d'un bouton               -> REPACK iOS-style : a chaque
-//                                       changement de cellule cible, le
-//                                       bouton drague occupe la nouvelle
-//                                       cellule et tous les autres
-//                                       boutons (non drague + non pinnes)
-//                                       sont retries puis reflowes vers
-//                                       la premiere position libre dans
-//                                       l'ordre geometrique haut-gauche
-//                                       -> bas-droite. Exactement comme
-//                                       l'iPhone reorganise sa home
-//                                       screen : la grille reste pleine
-//                                       et continue, les icones non
-//                                       saisies decalent en cascade.
 //                                       Au lacher, le bouton se pose sur
 //                                       la derniere case survolee.
 //   - long-press sans bouger         -> sortie du edit mode.
+//
+// Feedback visuel (tout base sur la translation = PPA-friendly sur
+// ESP32-P4 ; transform_scale est volontairement evite car l'unite PPA
+// rejette les blits scales et bascule en software rendering) :
+//   - edit mode : tous les boutons "respirent" par bob translate_y de
+//     0 -> -2 px (1000 ms A/R, dephasage par idx). Le bouton saisi
+//     est souleve de -6 px (translate_y) pendant le drag.
+//   - normal mode : LV_STATE_PRESSED est manuellement applique au
+//     bouton sur press/release pour conserver le style `pressed:`
+//     defini en YAML (translate_y, bg_color, etc.).
+//
+// Architecture
+// ------------
+//   Button (toujours NON-CLICKABLE : ne recoit plus d'event directement)
+//     +-- Overlay (enfant, TOUJOURS visible et clickable)
+//         Unique point d'entree pour toutes les interactions. Route
+//         soit vers simple-click-relay, soit vers drag-edit selon
+//         g_edit_mode.
+//
+// Etat
+// ----
 // - Stockage statique (inline variables) : ~300 octets, zero heap.
 // - g_active / g_moved sont remis a 0/-1 en fin de chaque press.
 // - L'identite d'un bouton (idx) est STABLE : g_buttons[idx] et
 //   g_overlays[idx] ne sont jamais reordonnes. Les swaps ne touchent
-//   g_overlays[idx] ne sont jamais reordonnes. Le repack ne touche
 //   que g_cell_of[] et g_button_at[], donc le user_data du callback
 //   reste valide apres un nombre quelconque d'echanges.
-//   reste valide apres un nombre quelconque de reorganisations.
 //
 
 #include "esphome/core/component.h"
+#include "esphome/core/automation.h"
+#include "lvgl.h"
+#include <cstdint>
+#include <climits>
+
+// ============================================================
+// Engine (pur LVGL)
+// ============================================================
+namespace draggable_grid {
+
+constexpr int MAX_BUTTONS = 16;
+
+struct Cell { int16_t x; int16_t y; };
+
+// Geometrie configurable (mise a jour par le Component ESPHome au setup)
+inline int16_t g_cell_w = 150;
+inline int16_t g_cell_h = 100;
+
+// Tables FIXES, indexees par identite de bouton (idx).
+inline lv_obj_t* g_buttons[MAX_BUTTONS]{};   // pointeur du bouton idx
+inline lv_obj_t* g_overlays[MAX_BUTTONS]{};  // pointeur de l'overlay idx
+inline Cell      g_cells[MAX_BUTTONS]{};     // position d'une cellule
 inline bool      g_pinned[MAX_BUTTONS]{};    // draggable=false : pas de
                                              // overlay, pas dans le reflow
 
 // Mappings courants cellule <-> bouton. Mis a jour uniquement au swap.
-// Mappings courants cellule <-> bouton. Mis a jour uniquement au repack.
 inline int8_t    g_cell_of[MAX_BUTTONS]{};
 inline int8_t    g_button_at[MAX_BUTTONS]{};
 
+inline int8_t    g_count = 0;
+inline int8_t    g_active = -1;        // -1 = idle, sinon idx de bouton
+inline bool      g_moved = false;      // drag en cours si true
+inline bool      g_long_fired = false; // le press en cours a deja tire
+                                       // LONG_PRESSED -> ignorer le
+                                       // relay simple-click au RELEASED
+inline bool      g_edit_mode = false;
+
+// Parent scroll lock pendant le drag : l'indev LVGL peut sinon
+// convertir la gestuelle en scroll sur un ancetre scrollable.
+inline lv_obj_t* g_drag_parent = nullptr;
 inline bool      g_parent_was_scrollable = false;
 
 // Cellule actuellement occupee par le bouton saisi (mise a jour pendant
 // le PRESSING). Sert a eviter de re-declencher un swap quand le doigt
-// le PRESSING). Sert a eviter de re-declencher un repack quand le doigt
 // reste dans la meme case.
 inline int8_t    g_last_target_cell = -1;
 
+// --- helpers internes ---------------------------------------
+// Renvoie -1 si aucune cellule libre (tout pinned, improbable).
+inline int8_t nearest_cell(int32_t cx, int32_t cy) {
+  int32_t best = INT32_MAX;
+  int8_t  best_i = -1;
+  for (int8_t i = 0; i < g_count; ++i) {
+    // Une cellule occupee par un bouton pinne est intangible : le
+    // bouton drague ne peut pas s'y poser ni pousser son occupant.
+    const int8_t occupant = g_button_at[i];
+    if (occupant >= 0 && g_pinned[occupant]) continue;
+    int32_t dx = cx - (g_cells[i].x + g_cell_w / 2);
+    int32_t dy = cy - (g_cells[i].y + g_cell_h / 2);
+    int32_t d  = dx * dx + dy * dy;
+    if (d < best) { best = d; best_i = i; }
+  }
+  return best_i;
+}
+
+// Animation de position packee (x+y dans un seul lv_anim_t, 1 call
+// lv_obj_set_pos par frame au lieu de 2). Cible : ESP32-P4 sans CPU
+// burn inutile.
+struct MoveAnim {
+  lv_obj_t* btn;
+  int16_t start_x, start_y;
+  int16_t end_x,   end_y;
+};
+inline MoveAnim g_move_anims[MAX_BUTTONS]{};
+
+inline void anim_pos_exec_cb(void* var, int32_t v) {
+  MoveAnim* m = static_cast<MoveAnim*>(var);
+  if (m == nullptr || m->btn == nullptr) return;
+  int32_t x = m->start_x + ((m->end_x - m->start_x) * v) / 1000;
+  int32_t y = m->start_y + ((m->end_y - m->start_y) * v) / 1000;
+  lv_obj_set_pos(m->btn, x, y);
+}
+
+// Reflow en ~150 ms : snap mais visible, proche du feel iOS.
+constexpr uint32_t REFLOW_MS = 150;
+
+inline void animate_btn_to(int8_t btn_idx, int32_t dst_x, int32_t dst_y) {
+  if (btn_idx < 0 || btn_idx >= MAX_BUTTONS) return;
+  lv_obj_t* btn = g_buttons[btn_idx];
+  if (btn == nullptr) return;
+
+  MoveAnim& m = g_move_anims[btn_idx];
+  m.btn     = btn;
+  m.start_x = static_cast<int16_t>(lv_obj_get_x_aligned(btn));
+  m.start_y = static_cast<int16_t>(lv_obj_get_y_aligned(btn));
+  m.end_x   = static_cast<int16_t>(dst_x);
+  m.end_y   = static_cast<int16_t>(dst_y);
+
+  if (m.start_x == m.end_x && m.start_y == m.end_y) return;
+
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_var(&a, &m);
+  lv_anim_set_exec_cb(&a, anim_pos_exec_cb);
+  lv_anim_set_time(&a, REFLOW_MS);
+  lv_anim_set_values(&a, 0, 1000);
+  lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+  lv_anim_start(&a);
+}
+
+inline void kill_pos_anim(int8_t btn_idx) {
+  if (btn_idx < 0 || btn_idx >= MAX_BUTTONS) return;
   lv_anim_delete(&g_move_anims[btn_idx], anim_pos_exec_cb);
 }
 
 // Swap pur : le bouton drague echange sa cellule avec l'occupant de
 // target_cell. Aucun autre bouton ne bouge.
-// Calcule l'ordre de scan geometrique des cellules : haut-gauche ->
-// bas-droite (tri par y croissant, puis x croissant). Permet de remplir
-// les trous "comme une page d'iPhone" independamment de l'ordre de
-// declaration YAML.
 //
 // Pourquoi pas un shift lineaire iOS-style ? Le shift parcourt les
 // cellules dans l'ordre d'index : pour un drag horizontal sur une
@@ -77,92 +175,20 @@ inline int8_t    g_last_target_cell = -1;
 // un drag vertical, target_cell est plusieurs index plus loin que
 // la cellule source, et toutes les cellules intermediaires (donc des
 // boutons sur d'autres lignes/colonnes) glissent inutilement.
-// Insertion sort O(N^2) sur N <= 16 : negligeable, et on l'appelle a la
-// demande (pas de cache invalide a maintenir).
-inline void compute_scan_order(int8_t* order, int8_t count) {
-  for (int8_t i = 0; i < count; ++i) order[i] = i;
-  for (int8_t i = 1; i < count; ++i) {
-    const int8_t k = order[i];
-    const int16_t ky = g_cells[k].y;
-    const int16_t kx = g_cells[k].x;
-    int8_t j = i;
-    while (j > 0) {
-      const int8_t p = order[j - 1];
-      if (g_cells[p].y > ky ||
-          (g_cells[p].y == ky && g_cells[p].x > kx)) {
-        order[j] = p;
-        --j;
-      } else {
-        break;
-      }
-    }
-    order[j] = k;
-  }
-}
-
-// iOS-style repack : le bouton drague occupe target_cell, et tous les
-// autres boutons (non drague + non pinnes) sont retries puis reflowes
-// vers la premiere position libre dans l'ordre geometrique. Exactement
-// comme l'iPhone reorganise sa home screen quand tu deplaces une icone :
-// les autres remontent / decalent en cascade pour combler les trous.
 //
 // Si target_cell est occupee par un bouton pinne, on l'ignore : le
 // bouton pinne ne peut pas etre deplace, donc on n'echange rien.
 inline void reflow_to(int8_t dragged_idx, int8_t target_cell) {
-// Pourquoi pas un swap pur ? Le swap echange seulement deux boutons et
-// laisse de gros trous quand on traverse plusieurs lignes. Le repack
-// preserve la coherence visuelle d'une grille toujours pleine et
-// continue, conformement au geste iOS.
-//
-// Si target_cell est occupee par un bouton pinne, on refuse : un pinne
-// est intangible et ne peut etre ni pousse ni remplace.
-inline void repack_to(int8_t dragged_idx, int8_t target_cell) {
   if (target_cell == g_last_target_cell) return;
   if (target_cell < 0) return;
   g_last_target_cell = target_cell;
 
   const int8_t src_cell = g_cell_of[dragged_idx];
   if (src_cell == target_cell) return;
-  if (dragged_idx < 0 || dragged_idx >= g_count) return;
 
   const int8_t target_occupant = g_button_at[target_cell];
   if (target_occupant >= 0 && g_pinned[target_occupant]) return;
 
-  if (g_cell_of[dragged_idx] == target_cell) {
-    g_last_target_cell = target_cell;
-    return;
-  }
-
-  g_last_target_cell = target_cell;
-
-  // 1) Collecte des "autres" (non drague, non pinne) dans l'ordre
-  //    geometrique de leur cellule actuelle. C'est cet ordre qui sera
-  //    preserve lors du reflow, comme iOS qui maintient le rang relatif
-  //    des icones non-saisies.
-  int8_t scan[MAX_BUTTONS];
-  compute_scan_order(scan, g_count);
-
-  int8_t others[MAX_BUTTONS];
-  int8_t other_count = 0;
-  for (int8_t s = 0; s < g_count; ++s) {
-    const int8_t cell = scan[s];
-    const int8_t b = g_button_at[cell];
-    if (b < 0) continue;
-    if (b == dragged_idx) continue;
-    if (g_pinned[b]) continue;
-    others[other_count++] = b;
-  }
-
-  // 2) Liberation des cellules non-pinnees. Les pinnes restent ancres
-  //    a leur cellule et sont intouchables par le repack.
-  for (int8_t cell = 0; cell < g_count; ++cell) {
-    const int8_t b = g_button_at[cell];
-    if (b >= 0 && g_pinned[b]) continue;
-    g_button_at[cell] = -1;
-  }
-
-  // 3) Place le bouton drague a la cellule cible (deja verifiee non
-  //    pinnee plus haut).
   g_button_at[target_cell] = dragged_idx;
   g_cell_of[dragged_idx]   = target_cell;
 
@@ -173,45 +199,190 @@ inline void repack_to(int8_t dragged_idx, int8_t target_cell) {
                    g_cells[src_cell].x, g_cells[src_cell].y);
   } else {
     g_button_at[src_cell] = -1;
-  // 4) Reflow : chaque "autre" prend la premiere cellule libre dans
-  //    l'ordre geometrique. Animation ease-out vers la nouvelle case.
-  int8_t scan_pos = 0;
-  for (int8_t i = 0; i < other_count; ++i) {
-    while (scan_pos < g_count) {
-      const int8_t cell = scan[scan_pos];
-      if (g_button_at[cell] < 0) break;
-      ++scan_pos;
-    }
-    if (scan_pos >= g_count) break;  // garde-fou : N cellules == N boutons
-    const int8_t cell = scan[scan_pos];
-    const int8_t b    = others[i];
-    g_button_at[cell] = b;
-    g_cell_of[b]      = cell;
-    animate_btn_to(b, g_cells[cell].x, g_cells[cell].y);
   }
 }
 
+// Breathing : bob translate_y de +-2 px, 1000 ms A/R, infini.
+// On evite volontairement transform_scale : l'unite PPA de l'ESP32-P4
+// rejette les blits scales (voir lv_draw_ppa.c ppa_evaluate) et bascule
+// en software scaling, tres couteux. Une translation pure reste dans
+// le chemin rapide PPA (fill + image blit acceleres).
+inline void breathe_exec_cb(void* var, int32_t v) {
+  lv_obj_set_style_translate_y(
+      static_cast<lv_obj_t*>(var), v, LV_PART_MAIN);
+}
+
+inline void start_breathe(lv_obj_t* btn, int8_t idx) {
+  if (btn == nullptr) return;
+
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_var(&a, btn);
+  lv_anim_set_exec_cb(&a, breathe_exec_cb);
+  lv_anim_set_time(&a, 1000);
+  lv_anim_set_playback_time(&a, 1000);
+  lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+  lv_anim_set_values(&a, 0, -2);
+  lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+  lv_anim_set_delay(&a, static_cast<uint32_t>(idx) * 100u);
+  lv_anim_start(&a);
+}
+
+inline void stop_breathe(lv_obj_t* btn) {
+  if (btn == nullptr) return;
+  lv_anim_delete(btn, breathe_exec_cb);
+  lv_obj_set_style_translate_y(btn, 0, LV_PART_MAIN);
+}
+
+// Coupe le breathing sur tous les boutons : appele au debut d'un drag
+// pour degager le pipeline PPA (translate_y sur N boutons en parallele
+// coute un redraw chacun, pas necessaire pendant un drag).
+inline void pause_all_breathe() {
+  for (int8_t i = 0; i < g_count; ++i) {
+    if (g_pinned[i]) continue;
+    stop_breathe(g_buttons[i]);
+  }
+}
+
+// Relance le breathing sur tous les boutons apres un drop si on est
+// toujours en edit mode.
+inline void resume_all_breathe() {
+  for (int8_t i = 0; i < g_count; ++i) {
+    if (g_pinned[i]) continue;
+    start_breathe(g_buttons[i], i);
+  }
+}
+
+inline void set_edit_mode(bool enabled) {
+  g_edit_mode = enabled;
+  for (int8_t i = 0; i < g_count; ++i) {
+    lv_obj_t* btn = g_buttons[i];
+    if (btn == nullptr) continue;
+    if (g_pinned[i]) continue;  // les pinned ne respirent pas : pas draggables
+    if (enabled) {
+      start_breathe(btn, i);
+    } else {
+      stop_breathe(btn);
+    }
+  }
+}
+
+inline void toggle_edit_mode() { set_edit_mode(!g_edit_mode); }
+
+// Callback attache A L'OVERLAY (toujours visible). Unique point
 // d'entree pour toutes les interactions utilisateur.
 //
 // user_data = identite STABLE du bouton (idx d'origine a l'attach).
 // Apres un swap, g_buttons[idx] et g_overlays[idx] ne changent PAS ;
-// Apres un repack, g_buttons[idx] et g_overlays[idx] ne changent PAS ;
 // seul g_cell_of[idx] est mis a jour.
 inline void overlay_event_cb(lv_event_t* e) {
   const lv_event_code_t code = lv_event_get_code(e);
+  const int8_t idx = static_cast<int8_t>(
+      reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
+  if (idx < 0 || idx >= g_count) return;
+  lv_obj_t* btn = g_buttons[idx];
+  if (btn == nullptr) return;
+
+  // --- LONG_PRESSED -------------------------------------------------
+  // En edit mode : sortie du edit mode (sauf si on est en plein drag).
+  // En normal mode : entree en edit mode.
+  if (code == LV_EVENT_LONG_PRESSED) {
+    if (g_edit_mode && g_active == idx && g_moved) return;  // drag actif
+    g_long_fired = true;        // annule le relay simple-click au RELEASED
+    g_active = -1;
+    g_moved = false;
+    lv_obj_remove_state(btn, LV_STATE_PRESSED);  // propre cote visuel
+    toggle_edit_mode();
+    return;
+  }
+
+  // --- PRESSED ------------------------------------------------------
+  if (code == LV_EVENT_PRESSED) {
+    g_active = idx;
+    g_moved = false;
+    g_long_fired = false;
+    if (g_edit_mode) {
+      // Coupe TOUTES les anims de respiration pour liberer le pipeline
+      // PPA pendant le drag + reflow (gain majeur sur ESP32-P4).
+      pause_all_breathe();
+      // Lift visuel du bouton saisi : translate_y pure, pas de scale,
+      // donc reste dans le chemin rapide PPA.
+      lv_obj_move_foreground(btn);
+      lv_obj_set_style_translate_y(btn, -6, LV_PART_MAIN);
+      // Annule toute anim de position en cours sur les voisins / sur le
+      // bouton saisi (qui suit le doigt 1:1).
+      for (int8_t i = 0; i < g_count; ++i) kill_pos_anim(i);
+      g_last_target_cell = g_cell_of[idx];
+      // Bloque le scroll du parent pendant le drag : sinon un mouvement
+      // vers le bas fait descendre tout l'affichage (LVGL convertit le
+      // geste en scroll sur l'ancetre scrollable).
+      g_drag_parent = lv_obj_get_parent(btn);
+      if (g_drag_parent != nullptr) {
+        g_parent_was_scrollable =
+            lv_obj_has_flag(g_drag_parent, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_clear_flag(g_drag_parent, LV_OBJ_FLAG_SCROLLABLE);
+      }
+    } else {
+      // Applique le style `pressed:` du YAML (translate_y, bg_color,...)
+      lv_obj_add_state(btn, LV_STATE_PRESSED);
+    }
+    return;
+  }
+
+  // --- PRESSING (drag + reflow en edit mode uniquement) -------------
+  if (code == LV_EVENT_PRESSING) {
+    if (!g_edit_mode) return;
+    if (g_active != idx) return;
+    lv_indev_t* indev = lv_indev_active();
+    if (indev == nullptr) return;
+    lv_point_t v;
+    lv_indev_get_vect(indev, &v);
+    if (v.x == 0 && v.y == 0) return;
+    g_moved = true;
+    // 1) le bouton saisi suit le doigt.
+    int32_t nx = lv_obj_get_x_aligned(btn) + v.x;
+    int32_t ny = lv_obj_get_y_aligned(btn) + v.y;
+    lv_obj_set_pos(btn, nx, ny);
+    // 2) reflow eventuel si le bouton saisi est desormais plus proche
+    //    d'une autre case.
+    int32_t cx = nx + g_cell_w / 2;
     int32_t cy = ny + g_cell_h / 2;
     int8_t  target = nearest_cell(cx, cy);
     if (target != g_last_target_cell) {
       reflow_to(idx, target);
-      repack_to(idx, target);
     }
     return;
   }
+
+  // --- RELEASED / PRESS_LOST ----------------------------------------
+  if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+    if (g_active != idx) return;
+    g_active = -1;
+
+    // ---- NORMAL MODE : simple-click relay ---------------------------
+    if (!g_edit_mode) {
+      lv_obj_remove_state(btn, LV_STATE_PRESSED);
+      const bool short_click =
+          (code == LV_EVENT_RELEASED) && !g_moved && !g_long_fired;
+      g_moved = false;
+      g_long_fired = false;
+      if (short_click) {
+        // Relaye PRESSED/RELEASED/CLICKED au bouton pour declencher
+        // on_press: et garder un etat coherent.
+        lv_obj_send_event(btn, LV_EVENT_PRESSED, nullptr);
+        lv_obj_send_event(btn, LV_EVENT_RELEASED, nullptr);
+        lv_obj_send_event(btn, LV_EVENT_CLICKED, nullptr);
+      }
+      return;
+    }
+
+    // ---- EDIT MODE : fin du drag (reflow deja applique pdt PRESSING) -
+    g_moved = false;
+    g_long_fired = false;
     g_last_target_cell = -1;
 
     // Le bouton saisi se pose anime sur la case finale (celle deja
     // inscrite dans g_cell_of par le dernier reflow_to).
-    // inscrite dans g_cell_of par le dernier repack_to).
     const int8_t dst_cell = g_cell_of[idx];
     animate_btn_to(idx, g_cells[dst_cell].x, g_cells[dst_cell].y);
 
