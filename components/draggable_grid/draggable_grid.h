@@ -1,496 +1,219 @@
 #pragma once
 //
-// Native ESPHome component for LVGL draggable grid (Magnetic Push-Away).
+// Native ESPHome component for LVGL draggable grid (Option A, iOS-style).
 // 100% declaratif cote YAML : aucune lambda ne doit etre ecrite par
 // l'utilisateur, et le YAML des boutons reste inchange.
 //
-// Gestuelle :
+// Gestuelle (v5) :
 //   - simple clic sur un bouton      -> l'event LV_EVENT_PRESSED est
 //                                       relaye au bouton -> on_press se
 //                                       declenche (ouvre la page).
 //   - long-press sur un bouton       -> entre en "edit mode".
 //     (en edit mode)
-//   - drag d'un bouton               -> MAGNETIC PUSH-AWAY : le bouton
-//                                       drague suit le doigt au pixel
-//                                       pres (placement libre style
-//                                       EEZ Studio). Les voisins qu'il
-//                                       chevauche sont repousses du
-//                                       Minimum Translation Vector
-//                                       (axe de plus petite penetration)
-//                                       en cascade : si B pousse C, C
-//                                       pousse D, etc. Les boutons
-//                                       pinnes sont des obstacles
-//                                       immobiles. Le bouton drague
-//                                       reste exactement ou il est
-//                                       lache (pas de snap-to-cell).
+//   - drag d'un bouton               -> SWAP : le bouton survole echange
+//                                       sa cellule avec le bouton drague.
+//                                       Aucun autre bouton ne bouge (le
+//                                       shift lineaire iOS-style donnait
+//                                       des deplacements parasites en
+//                                       drag vertical sur une grille
+//                                       multi-colonnes).
+//   - drag d'un bouton               -> REPACK iOS-style : a chaque
+//                                       changement de cellule cible, le
+//                                       bouton drague occupe la nouvelle
+//                                       cellule et tous les autres
+//                                       boutons (non drague + non pinnes)
+//                                       sont retries puis reflowes vers
+//                                       la premiere position libre dans
+//                                       l'ordre geometrique haut-gauche
+//                                       -> bas-droite. Exactement comme
+//                                       l'iPhone reorganise sa home
+//                                       screen : la grille reste pleine
+//                                       et continue, les icones non
+//                                       saisies decalent en cascade.
+//                                       Au lacher, le bouton se pose sur
+//                                       la derniere case survolee.
 //   - long-press sans bouger         -> sortie du edit mode.
-//
-// Feedback visuel (tout base sur la translation = PPA-friendly sur
-// ESP32-P4 ; transform_scale est volontairement evite car l'unite PPA
-// rejette les blits scales et bascule en software rendering) :
-//   - edit mode : tous les boutons "respirent" par bob translate_y de
-//     0 -> -2 px (1000 ms A/R, dephasage par idx). Le bouton saisi
-//     est souleve de -6 px (translate_y) pendant le drag.
-//   - normal mode : LV_STATE_PRESSED est manuellement applique au
-//     bouton sur press/release pour conserver le style `pressed:`
-//     defini en YAML (translate_y, bg_color, etc.).
-//
-// Architecture
-// ------------
-//   Button (toujours NON-CLICKABLE : ne recoit plus d'event directement)
-//     +-- Overlay (enfant, TOUJOURS visible et clickable)
-//         Unique point d'entree pour toutes les interactions. Route
-//         soit vers simple-click-relay, soit vers drag-edit selon
-//         g_edit_mode.
-//
-// Etat
-// ----
 // - Stockage statique (inline variables) : ~300 octets, zero heap.
 // - g_active / g_moved sont remis a 0/-1 en fin de chaque press.
 // - L'identite d'un bouton (idx) est STABLE : g_buttons[idx] et
-//   g_overlays[idx] ne sont jamais reordonnes. Le mode magnetic ne
-//   modifie que les positions pixel via lv_obj_set_pos, jamais
-//   l'index ; le user_data du callback reste donc valide.
+//   g_overlays[idx] ne sont jamais reordonnes. Les swaps ne touchent
+//   g_overlays[idx] ne sont jamais reordonnes. Le repack ne touche
+//   que g_cell_of[] et g_button_at[], donc le user_data du callback
+//   reste valide apres un nombre quelconque d'echanges.
+//   reste valide apres un nombre quelconque de reorganisations.
 //
 
 #include "esphome/core/component.h"
-#include "esphome/core/automation.h"
-#include "lvgl.h"
-#include <cstdint>
-#include <climits>
-
-// ============================================================
-// Engine (pur LVGL)
-// ============================================================
-namespace draggable_grid {
-
-constexpr int MAX_BUTTONS = 16;
-
-struct Cell { int16_t x; int16_t y; };
-
-// Geometrie configurable (mise a jour par le Component ESPHome au setup)
-inline int16_t g_cell_w = 150;
-inline int16_t g_cell_h = 100;
-
-// Tables FIXES, indexees par identite de bouton (idx).
-inline lv_obj_t* g_buttons[MAX_BUTTONS]{};   // pointeur du bouton idx
-inline lv_obj_t* g_overlays[MAX_BUTTONS]{};  // pointeur de l'overlay idx
-inline Cell      g_cells[MAX_BUTTONS]{};     // position INITIALE en pixels
-                                             // (apres setup, le placement
-                                             // libre style EEZ remplace
-                                             // ces valeurs)
 inline bool      g_pinned[MAX_BUTTONS]{};    // draggable=false : pas de
-                                             // overlay, exclu du push,
-                                             // sert d'obstacle immobile
+                                             // overlay, pas dans le reflow
 
-inline int8_t    g_count = 0;
-inline int8_t    g_active = -1;        // -1 = idle, sinon idx de bouton
-inline bool      g_moved = false;      // drag en cours si true
-inline bool      g_long_fired = false; // le press en cours a deja tire
-                                       // LONG_PRESSED -> ignorer le
-                                       // relay simple-click au RELEASED
-inline bool      g_edit_mode = false;
+// Mappings courants cellule <-> bouton. Mis a jour uniquement au swap.
+// Mappings courants cellule <-> bouton. Mis a jour uniquement au repack.
+inline int8_t    g_cell_of[MAX_BUTTONS]{};
+inline int8_t    g_button_at[MAX_BUTTONS]{};
 
-// Parent scroll lock pendant le drag : l'indev LVGL peut sinon
-// convertir la gestuelle en scroll sur un ancetre scrollable.
-inline lv_obj_t* g_drag_parent = nullptr;
 inline bool      g_parent_was_scrollable = false;
 
-// Animation de position packee (x+y dans un seul lv_anim_t, 1 call
-// lv_obj_set_pos par frame au lieu de 2). Cible : ESP32-P4 sans CPU
-// burn inutile.
-struct MoveAnim {
-  lv_obj_t* btn;
-  int16_t start_x, start_y;
-  int16_t end_x,   end_y;
-};
-inline MoveAnim g_move_anims[MAX_BUTTONS]{};
+// Cellule actuellement occupee par le bouton saisi (mise a jour pendant
+// le PRESSING). Sert a eviter de re-declencher un swap quand le doigt
+// le PRESSING). Sert a eviter de re-declencher un repack quand le doigt
+// reste dans la meme case.
+inline int8_t    g_last_target_cell = -1;
 
-inline void anim_pos_exec_cb(void* var, int32_t v) {
-  MoveAnim* m = static_cast<MoveAnim*>(var);
-  if (m == nullptr || m->btn == nullptr) return;
-  int32_t x = m->start_x + ((m->end_x - m->start_x) * v) / 1000;
-  int32_t y = m->start_y + ((m->end_y - m->start_y) * v) / 1000;
-  lv_obj_set_pos(m->btn, x, y);
-}
-
-// Reflow en ~150 ms : snap mais visible, proche du feel iOS.
-constexpr uint32_t REFLOW_MS = 150;
-
-inline void animate_btn_to(int8_t btn_idx, int32_t dst_x, int32_t dst_y) {
-  if (btn_idx < 0 || btn_idx >= MAX_BUTTONS) return;
-  lv_obj_t* btn = g_buttons[btn_idx];
-  if (btn == nullptr) return;
-
-  MoveAnim& m = g_move_anims[btn_idx];
-  m.btn     = btn;
-  m.start_x = static_cast<int16_t>(lv_obj_get_x_aligned(btn));
-  m.start_y = static_cast<int16_t>(lv_obj_get_y_aligned(btn));
-  m.end_x   = static_cast<int16_t>(dst_x);
-  m.end_y   = static_cast<int16_t>(dst_y);
-
-  if (m.start_x == m.end_x && m.start_y == m.end_y) return;
-
-  lv_anim_t a;
-  lv_anim_init(&a);
-  lv_anim_set_var(&a, &m);
-  lv_anim_set_exec_cb(&a, anim_pos_exec_cb);
-  lv_anim_set_time(&a, REFLOW_MS);
-  lv_anim_set_values(&a, 0, 1000);
-  lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
-  lv_anim_start(&a);
-}
-
-inline void kill_pos_anim(int8_t btn_idx) {
-  if (btn_idx < 0 || btn_idx >= MAX_BUTTONS) return;
   lv_anim_delete(&g_move_anims[btn_idx], anim_pos_exec_cb);
 }
 
-// =============================================================
-// Magnetic Push-Away (free-form drag, AABB collision response)
-// =============================================================
-// Inspire des moteurs physiques 2D (Box2D narrow-phase + MTV) mais
-// applique au layout LVGL : le bouton drague suit le doigt au pixel
-// pres (pas de snap-to-cell), et les voisins qu'il chevauche sont
-// pousses du Minimum Translation Vector (axe de plus petite
-// penetration). Le push se propage en cascade : si B pousse C, C
-// pousse D, etc. Les boutons pinnes sont des obstacles immobiles.
+// Swap pur : le bouton drague echange sa cellule avec l'occupant de
+// target_cell. Aucun autre bouton ne bouge.
+// Calcule l'ordre de scan geometrique des cellules : haut-gauche ->
+// bas-droite (tri par y croissant, puis x croissant). Permet de remplir
+// les trous "comme une page d'iPhone" independamment de l'ordre de
+// declaration YAML.
 //
-// Pourquoi pas un repack iOS ? Le repack force tous les boutons a
-// occuper des cellules pre-definies, ce qui interdit le placement
-// libre style EEZ Studio. Le Magnetic Push-Away laisse l'utilisateur
-// poser un bouton n'importe ou et garantit pourtant zero
-// chevauchement, en ne deplaceant que strictement les voisins
-// genes.
-//
-// Pourquoi pas un swap ? Idem : un swap force des positions
-// canoniques. Ici on veut une grille "liquide", chaque bouton a sa
-// position pixel propre.
-//
-// Cout : O(N^2) par iteration, O(K * N^2) au pire avec K cascades
-// (K <= MAX_PUSH_ITER). N <= 16 -> ~256 comparaisons AABB par
-// iteration, totalement negligeable. 100% PPA-friendly : on ne fait
-// que des lv_obj_set_pos (translation), aucun scale.
-
-// Renvoie true si les rectangles A et B se chevauchent (interieurs
-// strictement secants : un contact aux bords ne compte pas).
-inline bool aabb_overlap(int16_t ax, int16_t ay, int16_t aw, int16_t ah,
-                         int16_t bx, int16_t by, int16_t bw, int16_t bh) {
-  return ax < (int16_t)(bx + bw) && bx < (int16_t)(ax + aw) &&
-         ay < (int16_t)(by + bh) && by < (int16_t)(ay + ah);
-}
-
-// Calcule le Minimum Translation Vector pour separer B de A. On
-// teste les 4 axes possibles (push B a droite, gauche, bas, haut)
-// et on retient l'axe + signe avec la penetration la plus petite.
-// Resultat : *dx, *dy contient le delta a appliquer a B (un seul
-// des deux est non nul -> push axis-aligned).
-inline void compute_mtv(int16_t ax, int16_t ay, int16_t aw, int16_t ah,
-                        int16_t bx, int16_t by, int16_t bw, int16_t bh,
-                        int16_t* dx, int16_t* dy) {
-  const int16_t pen_right = (int16_t)((ax + aw) - bx); // push B vers la droite
-  const int16_t pen_left  = (int16_t)((bx + bw) - ax); // push B vers la gauche
-  const int16_t pen_down  = (int16_t)((ay + ah) - by); // push B vers le bas
-  const int16_t pen_up    = (int16_t)((by + bh) - ay); // push B vers le haut
-
-  const int16_t x_push = (pen_right < pen_left) ?  pen_right : (int16_t)(-pen_left);
-  const int16_t y_push = (pen_down  < pen_up)   ?  pen_down  : (int16_t)(-pen_up);
-
-  const int16_t x_abs = (x_push < 0) ? (int16_t)(-x_push) : x_push;
-  const int16_t y_abs = (y_push < 0) ? (int16_t)(-y_push) : y_push;
-
-  if (x_abs <= y_abs) { *dx = x_push; *dy = 0;       }
-  else                { *dx = 0;       *dy = y_push; }
-}
-
-// Recupere l'AABB courant d'un bouton (position align + taille de
-// cellule globale). On ne regarde pas lv_obj_get_width/height
-// pendant le drag : la taille reelle peut inclure padding/border et
-// la cellule g_cell_w/h est la reference logique de collision.
-inline void get_aabb(int8_t idx,
-                     int16_t* x, int16_t* y, int16_t* w, int16_t* h) {
-  lv_obj_t* btn = g_buttons[idx];
-  *x = (int16_t)lv_obj_get_x_aligned(btn);
-  *y = (int16_t)lv_obj_get_y_aligned(btn);
-  *w = g_cell_w;
-  *h = g_cell_h;
-}
-
-// Nombre maximum de passes de relaxation par evenement PRESSING.
-// 8 passes suffisent largement pour resoudre les chaines de cascade
-// jusqu'a 8 boutons aligned ; au dela on accepte un residu d'overlap
-// transitoire qui sera resolu au tick suivant.
-constexpr int MAGNETIC_MAX_ITER = 8;
-
-// Resolution magnetique : apres que le bouton drague a bouge, on
-// detecte les chevauchements et on pousse les non-pinnes hors de
-// portee via MTV. Cascade jusqu'a stabilisation ou MAX_ITER.
-//
-// On pousse uniquement les boutons NON drages et NON pinnes. Le
-// bouton drague reste sous le doigt ; les pinnes sont des
-// obstacles fixes (si un push genererait un overlap avec un pinne,
-// la passe suivante reglera le probleme en poussant sur l'autre
-// axe).
-inline void magnetic_resolve(int8_t dragged_idx) {
-  if (dragged_idx < 0 || dragged_idx >= g_count) return;
-
-  for (int iter = 0; iter < MAGNETIC_MAX_ITER; ++iter) {
-    bool any_pushed = false;
-
-    for (int8_t a = 0; a < g_count; ++a) {
-      lv_obj_t* obj_a = g_buttons[a];
-      if (obj_a == nullptr) continue;
-      int16_t ax, ay, aw, ah;
-      get_aabb(a, &ax, &ay, &aw, &ah);
-
-      for (int8_t b = 0; b < g_count; ++b) {
-        if (b == a) continue;
-        if (b == dragged_idx) continue;  // le drague suit le doigt
-        if (g_pinned[b]) continue;       // les pinnes sont immobiles
-
-        lv_obj_t* obj_b = g_buttons[b];
-        if (obj_b == nullptr) continue;
-        int16_t bx, by, bw, bh;
-        get_aabb(b, &bx, &by, &bw, &bh);
-
-        if (!aabb_overlap(ax, ay, aw, ah, bx, by, bw, bh)) continue;
-
-        int16_t dx, dy;
-        compute_mtv(ax, ay, aw, ah, bx, by, bw, bh, &dx, &dy);
-
-        // Clamp aux bornes du parent : evite qu'un push sorte le
-        // bouton hors de l'ecran. Si le clamp annule le push sur
-        // l'axe choisi, on tente l'autre axe pour ne pas rester
-        // bloque dans un overlap.
-        lv_obj_t* parent = lv_obj_get_parent(obj_b);
-        const int16_t pw = (parent != nullptr) ? (int16_t)lv_obj_get_width(parent)  : INT16_MAX;
-        const int16_t ph = (parent != nullptr) ? (int16_t)lv_obj_get_height(parent) : INT16_MAX;
-
-        int16_t new_bx = (int16_t)(bx + dx);
-        int16_t new_by = (int16_t)(by + dy);
-
-        if (new_bx < 0)              new_bx = 0;
-        if (new_by < 0)              new_by = 0;
-        if (new_bx + bw > pw)        new_bx = (int16_t)(pw - bw);
-        if (new_by + bh > ph)        new_by = (int16_t)(ph - bh);
-
-        // Si le clamp a annule le mouvement, tente l'autre axe.
-        if (new_bx == bx && new_by == by) {
-          if (dx != 0) {
-            // X bloque : essaie Y avec le sens donne par la position
-            // relative des centres.
-            const int16_t a_cy = (int16_t)(ay + ah / 2);
-            const int16_t b_cy = (int16_t)(by + bh / 2);
-            int16_t y_push = (b_cy >= a_cy)
-                ? (int16_t)((ay + ah) - by)   // push vers le bas
-                : (int16_t)(-((by + bh) - ay));// push vers le haut
-            new_by = (int16_t)(by + y_push);
-            if (new_by < 0) new_by = 0;
-            if (new_by + bh > ph) new_by = (int16_t)(ph - bh);
-          } else if (dy != 0) {
-            const int16_t a_cx = (int16_t)(ax + aw / 2);
-            const int16_t b_cx = (int16_t)(bx + bw / 2);
-            int16_t x_push = (b_cx >= a_cx)
-                ? (int16_t)((ax + aw) - bx)
-                : (int16_t)(-((bx + bw) - ax));
-            new_bx = (int16_t)(bx + x_push);
-            if (new_bx < 0) new_bx = 0;
-            if (new_bx + bw > pw) new_bx = (int16_t)(pw - bw);
-          }
-        }
-
-        if (new_bx == bx && new_by == by) continue; // vraiment coince
-
-        lv_obj_set_pos(obj_b, new_bx, new_by);
-        any_pushed = true;
+// Pourquoi pas un shift lineaire iOS-style ? Le shift parcourt les
+// cellules dans l'ordre d'index : pour un drag horizontal sur une
+// grille multi-colonnes, les cellules adjacentes en index sont aussi
+// adjacentes a l'ecran, donc le shift ressemble a un swap. Mais pour
+// un drag vertical, target_cell est plusieurs index plus loin que
+// la cellule source, et toutes les cellules intermediaires (donc des
+// boutons sur d'autres lignes/colonnes) glissent inutilement.
+// Insertion sort O(N^2) sur N <= 16 : negligeable, et on l'appelle a la
+// demande (pas de cache invalide a maintenir).
+inline void compute_scan_order(int8_t* order, int8_t count) {
+  for (int8_t i = 0; i < count; ++i) order[i] = i;
+  for (int8_t i = 1; i < count; ++i) {
+    const int8_t k = order[i];
+    const int16_t ky = g_cells[k].y;
+    const int16_t kx = g_cells[k].x;
+    int8_t j = i;
+    while (j > 0) {
+      const int8_t p = order[j - 1];
+      if (g_cells[p].y > ky ||
+          (g_cells[p].y == ky && g_cells[p].x > kx)) {
+        order[j] = p;
+        --j;
+      } else {
+        break;
       }
     }
-
-    if (!any_pushed) break;
+    order[j] = k;
   }
 }
 
-// Breathing : bob translate_y de +-2 px, 1000 ms A/R, infini.
-// On evite volontairement transform_scale : l'unite PPA de l'ESP32-P4
-// rejette les blits scales (voir lv_draw_ppa.c ppa_evaluate) et bascule
-// en software scaling, tres couteux. Une translation pure reste dans
-// le chemin rapide PPA (fill + image blit acceleres).
-inline void breathe_exec_cb(void* var, int32_t v) {
-  lv_obj_set_style_translate_y(
-      static_cast<lv_obj_t*>(var), v, LV_PART_MAIN);
-}
+// iOS-style repack : le bouton drague occupe target_cell, et tous les
+// autres boutons (non drague + non pinnes) sont retries puis reflowes
+// vers la premiere position libre dans l'ordre geometrique. Exactement
+// comme l'iPhone reorganise sa home screen quand tu deplaces une icone :
+// les autres remontent / decalent en cascade pour combler les trous.
+//
+// Si target_cell est occupee par un bouton pinne, on l'ignore : le
+// bouton pinne ne peut pas etre deplace, donc on n'echange rien.
+inline void reflow_to(int8_t dragged_idx, int8_t target_cell) {
+// Pourquoi pas un swap pur ? Le swap echange seulement deux boutons et
+// laisse de gros trous quand on traverse plusieurs lignes. Le repack
+// preserve la coherence visuelle d'une grille toujours pleine et
+// continue, conformement au geste iOS.
+//
+// Si target_cell est occupee par un bouton pinne, on refuse : un pinne
+// est intangible et ne peut etre ni pousse ni remplace.
+inline void repack_to(int8_t dragged_idx, int8_t target_cell) {
+  if (target_cell == g_last_target_cell) return;
+  if (target_cell < 0) return;
+  g_last_target_cell = target_cell;
 
-inline void start_breathe(lv_obj_t* btn, int8_t idx) {
-  if (btn == nullptr) return;
+  const int8_t src_cell = g_cell_of[dragged_idx];
+  if (src_cell == target_cell) return;
+  if (dragged_idx < 0 || dragged_idx >= g_count) return;
 
-  lv_anim_t a;
-  lv_anim_init(&a);
-  lv_anim_set_var(&a, btn);
-  lv_anim_set_exec_cb(&a, breathe_exec_cb);
-  lv_anim_set_time(&a, 1000);
-  lv_anim_set_playback_time(&a, 1000);
-  lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-  lv_anim_set_values(&a, 0, -2);
-  lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
-  lv_anim_set_delay(&a, static_cast<uint32_t>(idx) * 100u);
-  lv_anim_start(&a);
-}
+  const int8_t target_occupant = g_button_at[target_cell];
+  if (target_occupant >= 0 && g_pinned[target_occupant]) return;
 
-inline void stop_breathe(lv_obj_t* btn) {
-  if (btn == nullptr) return;
-  lv_anim_delete(btn, breathe_exec_cb);
-  lv_obj_set_style_translate_y(btn, 0, LV_PART_MAIN);
-}
-
-// Coupe le breathing sur tous les boutons : appele au debut d'un drag
-// pour degager le pipeline PPA (translate_y sur N boutons en parallele
-// coute un redraw chacun, pas necessaire pendant un drag).
-inline void pause_all_breathe() {
-  for (int8_t i = 0; i < g_count; ++i) {
-    if (g_pinned[i]) continue;
-    stop_breathe(g_buttons[i]);
+  if (g_cell_of[dragged_idx] == target_cell) {
+    g_last_target_cell = target_cell;
+    return;
   }
-}
 
-// Relance le breathing sur tous les boutons apres un drop si on est
-// toujours en edit mode.
-inline void resume_all_breathe() {
-  for (int8_t i = 0; i < g_count; ++i) {
-    if (g_pinned[i]) continue;
-    start_breathe(g_buttons[i], i);
+  g_last_target_cell = target_cell;
+
+  // 1) Collecte des "autres" (non drague, non pinne) dans l'ordre
+  //    geometrique de leur cellule actuelle. C'est cet ordre qui sera
+  //    preserve lors du reflow, comme iOS qui maintient le rang relatif
+  //    des icones non-saisies.
+  int8_t scan[MAX_BUTTONS];
+  compute_scan_order(scan, g_count);
+
+  int8_t others[MAX_BUTTONS];
+  int8_t other_count = 0;
+  for (int8_t s = 0; s < g_count; ++s) {
+    const int8_t cell = scan[s];
+    const int8_t b = g_button_at[cell];
+    if (b < 0) continue;
+    if (b == dragged_idx) continue;
+    if (g_pinned[b]) continue;
+    others[other_count++] = b;
   }
-}
 
-inline void set_edit_mode(bool enabled) {
-  g_edit_mode = enabled;
-  for (int8_t i = 0; i < g_count; ++i) {
-    lv_obj_t* btn = g_buttons[i];
-    if (btn == nullptr) continue;
-    if (g_pinned[i]) continue;  // les pinned ne respirent pas : pas draggables
-    if (enabled) {
-      start_breathe(btn, i);
-    } else {
-      stop_breathe(btn);
+  // 2) Liberation des cellules non-pinnees. Les pinnes restent ancres
+  //    a leur cellule et sont intouchables par le repack.
+  for (int8_t cell = 0; cell < g_count; ++cell) {
+    const int8_t b = g_button_at[cell];
+    if (b >= 0 && g_pinned[b]) continue;
+    g_button_at[cell] = -1;
+  }
+
+  // 3) Place le bouton drague a la cellule cible (deja verifiee non
+  //    pinnee plus haut).
+  g_button_at[target_cell] = dragged_idx;
+  g_cell_of[dragged_idx]   = target_cell;
+
+  if (target_occupant >= 0 && target_occupant != dragged_idx) {
+    g_button_at[src_cell]      = target_occupant;
+    g_cell_of[target_occupant] = src_cell;
+    animate_btn_to(target_occupant,
+                   g_cells[src_cell].x, g_cells[src_cell].y);
+  } else {
+    g_button_at[src_cell] = -1;
+  // 4) Reflow : chaque "autre" prend la premiere cellule libre dans
+  //    l'ordre geometrique. Animation ease-out vers la nouvelle case.
+  int8_t scan_pos = 0;
+  for (int8_t i = 0; i < other_count; ++i) {
+    while (scan_pos < g_count) {
+      const int8_t cell = scan[scan_pos];
+      if (g_button_at[cell] < 0) break;
+      ++scan_pos;
     }
+    if (scan_pos >= g_count) break;  // garde-fou : N cellules == N boutons
+    const int8_t cell = scan[scan_pos];
+    const int8_t b    = others[i];
+    g_button_at[cell] = b;
+    g_cell_of[b]      = cell;
+    animate_btn_to(b, g_cells[cell].x, g_cells[cell].y);
   }
 }
 
-inline void toggle_edit_mode() { set_edit_mode(!g_edit_mode); }
-
-// Callback attache A L'OVERLAY (toujours visible). Unique point
 // d'entree pour toutes les interactions utilisateur.
 //
 // user_data = identite STABLE du bouton (idx d'origine a l'attach).
-// En mode magnetic, g_buttons[idx] / g_overlays[idx] / g_pinned[idx]
-// sont fixes ; seules les positions pixel (lv_obj_set_pos) bougent.
+// Apres un swap, g_buttons[idx] et g_overlays[idx] ne changent PAS ;
+// Apres un repack, g_buttons[idx] et g_overlays[idx] ne changent PAS ;
+// seul g_cell_of[idx] est mis a jour.
 inline void overlay_event_cb(lv_event_t* e) {
   const lv_event_code_t code = lv_event_get_code(e);
-  const int8_t idx = static_cast<int8_t>(
-      reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
-  if (idx < 0 || idx >= g_count) return;
-  lv_obj_t* btn = g_buttons[idx];
-  if (btn == nullptr) return;
-
-  // --- LONG_PRESSED -------------------------------------------------
-  // En edit mode : sortie du edit mode (sauf si on est en plein drag).
-  // En normal mode : entree en edit mode.
-  if (code == LV_EVENT_LONG_PRESSED) {
-    if (g_edit_mode && g_active == idx && g_moved) return;  // drag actif
-    g_long_fired = true;        // annule le relay simple-click au RELEASED
-    g_active = -1;
-    g_moved = false;
-    lv_obj_remove_state(btn, LV_STATE_PRESSED);  // propre cote visuel
-    toggle_edit_mode();
-    return;
-  }
-
-  // --- PRESSED ------------------------------------------------------
-  if (code == LV_EVENT_PRESSED) {
-    g_active = idx;
-    g_moved = false;
-    g_long_fired = false;
-    if (g_edit_mode) {
-      // Coupe TOUTES les anims de respiration pour liberer le pipeline
-      // PPA pendant le drag + push (gain majeur sur ESP32-P4).
-      pause_all_breathe();
-      // Lift visuel du bouton saisi : translate_y pure, pas de scale,
-      // donc reste dans le chemin rapide PPA.
-      lv_obj_move_foreground(btn);
-      lv_obj_set_style_translate_y(btn, -6, LV_PART_MAIN);
-      // Annule toute anim de position en cours sur les voisins : en
-      // mode magnetic les voisins sont deplaces immediatement par
-      // lv_obj_set_pos, pas via animate_btn_to.
-      for (int8_t i = 0; i < g_count; ++i) kill_pos_anim(i);
-      // Bloque le scroll du parent pendant le drag : sinon un mouvement
-      // vers le bas fait descendre tout l'affichage (LVGL convertit le
-      // geste en scroll sur l'ancetre scrollable).
-      g_drag_parent = lv_obj_get_parent(btn);
-      if (g_drag_parent != nullptr) {
-        g_parent_was_scrollable =
-            lv_obj_has_flag(g_drag_parent, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_clear_flag(g_drag_parent, LV_OBJ_FLAG_SCROLLABLE);
-      }
-    } else {
-      // Applique le style `pressed:` du YAML (translate_y, bg_color,...)
-      lv_obj_add_state(btn, LV_STATE_PRESSED);
+    int32_t cy = ny + g_cell_h / 2;
+    int8_t  target = nearest_cell(cx, cy);
+    if (target != g_last_target_cell) {
+      reflow_to(idx, target);
+      repack_to(idx, target);
     }
     return;
   }
+    g_last_target_cell = -1;
 
-  // --- PRESSING (drag + magnetic push-away en edit mode) ------------
-  if (code == LV_EVENT_PRESSING) {
-    if (!g_edit_mode) return;
-    if (g_active != idx) return;
-    lv_indev_t* indev = lv_indev_active();
-    if (indev == nullptr) return;
-    lv_point_t v;
-    lv_indev_get_vect(indev, &v);
-    if (v.x == 0 && v.y == 0) return;
-    g_moved = true;
-    // 1) Le bouton saisi suit le doigt au pixel pres (positionnement
-    //    libre style EEZ, pas de snap-to-cell).
-    int32_t nx = lv_obj_get_x_aligned(btn) + v.x;
-    int32_t ny = lv_obj_get_y_aligned(btn) + v.y;
-    lv_obj_set_pos(btn, nx, ny);
-    // 2) Resolution magnetique : detecte les chevauchements avec les
-    //    voisins non-pinnes et les pousse via MTV en cascade. Les
-    //    pinnes restent immobiles, le drague reste sous le doigt.
-    magnetic_resolve(idx);
-    return;
-  }
-
-  // --- RELEASED / PRESS_LOST ----------------------------------------
-  if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-    if (g_active != idx) return;
-    g_active = -1;
-
-    // ---- NORMAL MODE : simple-click relay ---------------------------
-    if (!g_edit_mode) {
-      lv_obj_remove_state(btn, LV_STATE_PRESSED);
-      const bool short_click =
-          (code == LV_EVENT_RELEASED) && !g_moved && !g_long_fired;
-      g_moved = false;
-      g_long_fired = false;
-      if (short_click) {
-        // Relaye PRESSED/RELEASED/CLICKED au bouton pour declencher
-        // on_press: et garder un etat coherent.
-        lv_obj_send_event(btn, LV_EVENT_PRESSED, nullptr);
-        lv_obj_send_event(btn, LV_EVENT_RELEASED, nullptr);
-        lv_obj_send_event(btn, LV_EVENT_CLICKED, nullptr);
-      }
-      return;
-    }
-
-    // ---- EDIT MODE : fin du drag (positionnement libre, pas de snap)
-    // En mode magnetic le bouton drague reste exactement ou il a ete
-    // lache : pas d'animation vers une cellule canonique. La position
-    // pixel courante EST la position finale.
-    g_moved = false;
-    g_long_fired = false;
-
-    // Retire le lift (-6 px) applique au PRESSED. Le breathe relance
-    // ensuite reprendra a 0 et n'aura pas de saut visuel.
-    lv_obj_set_style_translate_y(btn, 0, LV_PART_MAIN);
+    // Le bouton saisi se pose anime sur la case finale (celle deja
+    // inscrite dans g_cell_of par le dernier reflow_to).
+    // inscrite dans g_cell_of par le dernier repack_to).
+    const int8_t dst_cell = g_cell_of[idx];
+    animate_btn_to(idx, g_cells[dst_cell].x, g_cells[dst_cell].y);
 
     // Restaure le scroll du parent si on l'avait desactive.
     if (g_drag_parent != nullptr && g_parent_was_scrollable) {
@@ -521,6 +244,8 @@ inline void attach(lv_obj_t* obj, int idx, int16_t cx, int16_t cy,
   g_cells[idx].x = cx;
   g_cells[idx].y = cy;
   g_buttons[idx] = obj;
+  g_cell_of[idx] = idx;
+  g_button_at[idx] = idx;
   g_pinned[idx]  = !draggable;
   if (idx + 1 > g_count) g_count = idx + 1;
   lv_obj_set_pos(obj, cx, cy);
